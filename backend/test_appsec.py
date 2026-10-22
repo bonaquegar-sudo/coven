@@ -227,4 +227,21 @@ with tempfile.TemporaryDirectory() as d:
     ws = Workspace(d)
     assert "MIICXAIBAAKBgQDN" not in ws.read_file("k.py") and "7: inline = '[REDACTED" in ws.read_file("k.py")
     assert "MIICXAIBAAKBgQDN" not in ws.search_code("inline|MIIC")
+# agent autonomy: free commands and scripts inside the project, guardrails for the dangerous ones
+with tempfile.TemporaryDirectory() as d:
+    (Path(d) / "mod.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    ws = Workspace(d)
+    run = lambda tool, **a: asyncio.run(ws.call(tool, a))
+    assert run("run_command", command="python -I mod.py").startswith("exit code 0")
+    assert run("run_command", command="python --version").startswith("exit code 0")
+    out = run("run_code", language="python", code="import sys; sys.path.insert(0, '.')\nfrom mod import add\nassert add(2, 3) == 5\nprint('ok')")
+    assert out.startswith("exit code 0") and "ok" in out, out
+    assert "exit code 1" in run("run_code", language="python", code="raise SystemExit(1)")
+    assert not list((Path(d) / ".coven").glob("*")), "scripts are cleaned up"
+    for bad in ["rm -rf .", "del mod.py", "powershell -c dir", "git push origin main", "curl http://example.com",
+                "python -c print(1)", "python ../outside.py", "python C:/Windows/win.ini", "node x.js http://evil.example"]:
+        assert run("run_command", command=bad).startswith("ERROR"), bad
+    assert run("run_code", language="python", code="import urllib.request\nurllib.request.urlopen('https://evil.example')").startswith("ERROR")
+    assert run("run_code", language="ruby", code="puts 1").startswith("ERROR")
+    assert not run("run_command", command="node x.js http://127.0.0.1:3002/api").startswith("ERROR: red")
 print("appsec OK")

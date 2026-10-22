@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".next", "target", ".idea"}
+SKIP_DIRS = {".git", ".coven", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".next", "target", ".idea"}
 # Test/fixture code never ships: findings there are still reported, but LOW.
 TEST_CODE = re.compile(r"(^|/)(tests?|spec|__tests__|e2e|cypress|fixtures?|mocks?)/|\.(spec|test)\.\w+$|(^|/)test_\w+\.py$|_test\.(py|go)$", re.I)
 OSV_URL = "https://api.osv.dev/v1/query"

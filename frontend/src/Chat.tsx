@@ -212,7 +212,7 @@ function Composer({ hero }: { hero?: boolean }) {
   const launch = useLaunch();
   const submit = () => (s.socket ? s.send(s.draft) : launch(s.draft));
   return (
-    <div className={`flex items-end gap-2 ${hero ? "py-2.5" : "border-t border-white/[0.06] pt-2.5"}`}>
+    <div className={`flex items-end gap-2 rounded-lg border border-white/[0.08] bg-card px-3 py-2 transition-colors focus-within:border-white/20 ${hero ? "mt-3" : ""}`}>
       <textarea
         value={s.draft}
         onChange={(e) => s.set({ draft: e.target.value })}

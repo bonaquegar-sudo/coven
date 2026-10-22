@@ -21,6 +21,13 @@ TEST_COMMANDS = [
     ["pytest"], ["python", "-m", "pytest"], ["npm", "test"], ["npm", "run", "test"], ["npm", "run", "lint"],
     ["npx", "vitest", "run"], ["npx", "jest"], ["npx", "tsc", "--noEmit"], ["npx", "eslint"], ["ruff", "check"],
 ]
+# run_command guardrails: no shells (they would bypass every check below), deletion, privilege or system tools
+BLOCKED_EXES = {"rm", "rmdir", "del", "erase", "rd", "format", "mkfs", "dd", "shutdown", "reboot", "sudo", "su", "runas",
+                "cmd", "powershell", "pwsh", "bash", "sh", "zsh", "wsl", "reg", "regedit", "diskpart", "takeown", "icacls",
+                "chmod", "chown", "kill", "taskkill", "curl", "wget", "ssh", "scp", "nc", "ncat", "netsh", "schtasks"}
+BLOCKED_SUBCOMMANDS = ("git push", "git reset", "git clean", "git checkout", "git restore", "git rebase", "git remote",
+                       "git config", "npm publish", "npm adduser", "npm login", "npm token", "pip uninstall",
+                       "npm uninstall", "yarn publish", "pnpm publish", "python -c", "node -e", "node --eval")
 
 # name -> (description, {param: description}, required params)
 SPECS = {
@@ -40,6 +47,14 @@ SPECS = {
     "get_git_diff": ("Diff unificado de todos los cambios hechos en esta sesión.", {}, []),
     "run_tests": ("Ejecuta un test runner/linter permitido: " + ", ".join(" ".join(c) for c in TEST_COMMANDS),
                   {"command": "Comando, ej. 'npx vitest run' o 'pytest -q'"}, ["command"]),
+    "run_command": ("Ejecuta cualquier comando de desarrollo en la raíz del proyecto (sin shell: nada de pipes ni &&), p. ej. "
+                    "'npm install', 'node scripts/check.js', 'python -m pip list', 'git log -5'. Sin borrados, sin git push/reset, "
+                    "rutas solo dentro del proyecto, red solo a localhost. Devuelve exit code y salida.",
+                    {"command": "Comando completo", "timeout": "Segundos, máx. 300 (120 por defecto)"}, ["command"]),
+    "run_code": ("Ejecuta un script corto de diagnóstico (regression_test, diagnostic_input) en Python o Node con cwd en la "
+                 "raíz del proyecto, p. ej. para importar un módulo y comprobar una función parcheada. Red solo a localhost.",
+                 {"language": "python o node", "code": "Código completo del script", "timeout": "Segundos, máx. 120 (60 por defecto)"},
+                 ["language", "code"]),
     # AppSec
     "scan_dependencies_osv": ("SCA: consulta OSV.dev con cada dependencia fijada (package.json, requirements.txt, "
                               "pyproject.toml). Devuelve CVEs reales, severidad y versión segura.", {}, []),
@@ -224,14 +239,56 @@ class Workspace:
         argv = shlex.split(command)
         if not any(argv[:len(c)] == c for c in TEST_COMMANDS):
             raise ValueError("comando no permitido")
+        return self._exec(argv, 300)
+
+    def run_command(self, command: str, timeout: str | int = 120) -> str:
+        argv = shlex.split(command.replace(chr(92), "/"))  # forward slashes: posix quoting without eating Windows paths
+        if not argv:
+            raise ValueError("comando vacío")
+        exe = Path(argv[0]).stem.lower()
+        if exe in BLOCKED_EXES or any(" ".join([exe, *argv[1:3]]).lower().startswith(b) for b in BLOCKED_SUBCOMMANDS):
+            raise ValueError(f"'{' '.join(argv[:2])}' no está permitido (destructivo, shell o publicación)")
+        for a in argv[1:]:
+            self._check_arg(a.strip("'\""))
+        return self._exec(argv, min(int(timeout or 120), 300))
+
+    def run_code(self, language: str, code: str, timeout: str | int = 60) -> str:
+        lang = language.strip().lower()
+        if lang not in ("python", "node"):
+            raise ValueError("language debe ser python o node")
+        for url in re.findall(r"https?://[^\s'\"`)]+", code):
+            self._check_arg(url)
+        scratch = self.root / ".coven"
+        scratch.mkdir(exist_ok=True)
+        script = scratch / f"diag_{os.getpid()}_{abs(hash(code)) % 10**8}.{'py' if lang == 'python' else 'js'}"
+        script.write_text(code, encoding="utf-8")
+        try:
+            return self._exec(["python", "-I", str(script)] if lang == "python" else ["node", str(script)],
+                              min(int(timeout or 60), 120))
+        finally:
+            script.unlink(missing_ok=True)
+
+    def _check_arg(self, arg: str) -> None:
+        """Agent commands stay in the project and only talk to localhost."""
+        if re.match(r"^[a-z]+://", arg, re.I):
+            host = re.match(r"^[a-z]+://(?:[^@/]*@)?(\[[^\]]+\]|[^:/?#]+)", arg, re.I)
+            if not host or host.group(1).strip("[]").lower() not in appsec.LOCAL_HOSTS | {"::1"}:
+                raise ValueError(f"red solo a localhost: {arg[:80]}")
+        elif Path(arg).is_absolute() or re.match(r"^[A-Za-z]:[\\/]", arg) or ".." in Path(arg).parts:
+            if not (self.root / arg).resolve().is_relative_to(self.root):
+                raise ValueError(f"ruta fuera del proyecto: {arg[:80]}")
+
+    def _exec(self, argv: list[str], timeout: int) -> str:
         exe = shutil.which(argv[0])  # resolves npx.cmd etc. on Windows without shell=True
         if not exe:
             raise ValueError(f"{argv[0]} no está instalado")
+        # no credentials from Coven's own environment reach agent-run processes
+        env = {k: v for k, v in os.environ.items() if not re.search(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL", k, re.I)}
         try:
-            r = subprocess.run([exe, *argv[1:]], cwd=self.root, capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", timeout=300)
+            r = subprocess.run([exe, *argv[1:]], cwd=self.root, capture_output=True, text=True, env=env,
+                               encoding="utf-8", errors="replace", timeout=timeout, stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
-            return "TIMEOUT tras 300s"
+            return f"TIMEOUT tras {timeout}s"
         out = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", r.stdout + r.stderr)  # strip ANSI colours
         return f"exit code {r.returncode}\n{out[-MAX_OUT:]}"
 

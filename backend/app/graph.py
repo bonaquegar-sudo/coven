@@ -23,9 +23,10 @@ AGENTS = {
                                    "map_api_routes"]),
     "Reviewer": ("auditoria", ["read_file", "search_code", "list_directory", "find_files", "run_sast", "report_finding",
                                "list_findings"]),
-    "QARunner": ("tests", ["run_tests", "read_file", "list_directory", "find_files", "verify_endpoint_security",
+    "QARunner": ("tests", ["run_tests", "run_command", "run_code", "read_file", "list_directory", "find_files", "verify_endpoint_security",
                            "scan_dependencies_osv", "scan_secrets", "run_sast", "set_finding_status", "list_findings"]),
     "Fixer": ("parches", ["read_file", "search_code", "apply_patch", "write_file", "get_git_diff", "set_finding_status",
+                          "run_command", "run_code",
                           "list_findings"]),
 }
 # scanners each agent runs deterministically before its LLM turn; results go into its task
@@ -114,8 +115,9 @@ async def use_tool(agent: str, tool: str, args: dict, ws: Workspace) -> str:
               "status": "error" if out.startswith("ERROR") else "done", "summary": out.split("\n", 1)[0][:200],
               "output": out[:4000], "duration_ms": round((time.monotonic() - t0) * 1000)})
         emit({"type": "security_findings", "findings": list(ws.findings.items.values())})
-    if tool == "run_tests":
-        emit({"type": "test_output", "agent": agent, "command": args.get("command", ""), "output": out})
+    if tool in ("run_tests", "run_command", "run_code"):
+        command = args.get("command") or f"{args.get('language', '')} script ({len(str(args.get('code', '')).splitlines())} líneas)"
+        emit({"type": "test_output", "agent": agent, "command": command, "output": out})
     return out
 
 
