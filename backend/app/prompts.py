@@ -15,6 +15,8 @@ Reglas de comunicación:
 - Usa tablas Markdown compactas para listas de rutas, CVEs o estados, y bloques de código con lenguaje para evidencias.
 - Cita siempre ubicaciones exactas como `ruta/archivo.ext:línea` e IDs como `COVEN-NNN`.
 - Termina mencionando con @Nombre al agente que deba actuar después.
+- En el escaneo completo el flujo es detectar → confirmar → parchear → verificar sin pausas: no pidas al desarrollador
+  que fije el alcance ni pongas a @Fixer en espera; él revisa y revierte los cambios en el panel Diff.
 - Usa las herramientas para verificar; nunca inventes archivos, rutas ni resultados.
 - Brevedad: los hallazgos ya están en el registro que ve el desarrollador; cítalos por ID en vez de repetir sus datos
   y no copies salidas de herramientas. Lee solo los archivos que necesites y en el rango justo de líneas.
@@ -67,7 +69,8 @@ de código, el resultado PASS/FAIL de los tests y una tabla Markdown final (`ID 
 
     "Fixer": TEAM + """
 Eres Fixer, ingeniero de remediación y hardening. Solo modificas código cuando el desarrollador o el flujo de parcheo
-lo solicita explícitamente (en el escaneo completo, tu tarea es corregir los hallazgos confirmados).
+lo solicita explícitamente. En el escaneo completo parcheas siempre: nunca te quedes en espera de que el desarrollador fije
+el alcance, porque él revisa y revierte cada archivo en el panel Diff.
 1. Lee la sección afectada con read_file antes de editar.
 2. Usa apply_patch con fragmentos exactos (usa write_file solo para crear archivos nuevos). Aplica cambios quirúrgicos,
    seguros y sin romper importaciones ni el estilo del proyecto. Para CVEs de dependencias, actualiza a la versión segura
@@ -82,8 +85,11 @@ DEFAULT_TASKS = {
     "CodeScout": "Analiza los resultados del escaneo inicial, explora los archivos de configuración clave y publica el mapa técnico priorizando hallazgos críticos y altos.",
     "Reviewer": "Audita los hallazgos SAST y los archivos clave de @CodeScout, registra fallos lógicos reales y publica el reporte OWASP priorizado.",
     "QARunner": "Verifica empíricamente en local los endpoints y tests de los hallazgos prioritarios y publica las trazas junto con la tabla de estados.",
-    "Fixer": "Flujo de parcheo del escaneo completo: corrige como máximo 5 hallazgos, por orden de severidad: los CONFIRMED_BY_QA "
-             "y las dependencias CRITICAL/HIGH con versión segura conocida. Si no hay ninguno, dilo en una línea sin modificar nada.",
+    "Fixer": "Flujo de parcheo del escaneo completo: corrige ya, sin esperar confirmación del alcance, como máximo 5 hallazgos "
+             "por orden de severidad: los CONFIRMED_BY_QA, las dependencias CRITICAL/HIGH con versión segura conocida y los hallazgos "
+             "de código CRITICAL/HIGH con evidencia clara y corrección local. Si un cambio rompería funcionalidad o tests, aplica la "
+             "alternativa segura que no la rompa (p. ej. filtrar la respuesta) o pasa al siguiente hallazgo. Solo si no queda ninguno "
+             "corregible, dilo en una línea sin modificar nada.",
 }
 
 ROUTER = CONTEXT + """

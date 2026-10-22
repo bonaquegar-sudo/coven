@@ -194,7 +194,10 @@ def inventory(ws: Workspace) -> str:
 def agent_node(name: str):
     async def node(state: CovenState, config: RunnableConfig):
         cfg, ws = config["configurable"]["llm"], config["configurable"]["workspace"]
-        task = f"{state.get('request') or DEFAULT_TASKS[name]}\n\n{context(state)}"
+        request = state.get("request")
+        if name == "Fixer" and request and not re.search(r"COVEN-\d+", request):
+            request += "\n\n" + DEFAULT_TASKS["Fixer"]  # no specific ids → this is the scan's patching flow
+        task = f"{request or DEFAULT_TASKS[name]}\n\n{context(state)}"
         if PRE_RUN.get(name):
             outs = []
             for tool in PRE_RUN[name]:
