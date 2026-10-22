@@ -33,6 +33,7 @@
   --color-muted: #8f8e88;
   --color-logo: #34d399; /* pixel wordmark tiles */
   --color-logo-grid: #1f9e73;
+  --color-logo-shadow: #0d4a36;
 
   --animate-fade-up: fade-up 260ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
   --animate-fade: fade 180ms ease-out both;
@@ -86,6 +87,27 @@ button {
 }
 .logo-gear.is-spinning {
   animation: spin 3.2s linear infinite;
+}
+/* Hero wordmark: tiles pop in pixel by pixel, then a glint sweeps across every few seconds */
+.logo-big {
+  filter: drop-shadow(0 0 18px rgb(52 211 153 / 0.18));
+}
+.logo-big .px {
+  fill: var(--color-logo);
+  stroke: var(--color-logo-shadow); /* visible seams between blocks */
+  stroke-width: 1.5;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: px-in 0.36s steps(3, end) both, px-glint 6s steps(1, end) infinite;
+}
+@keyframes px-in {
+  from { opacity: 0; transform: scale(0.2); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes px-glint {
+  0% { fill: #d1fae5; }
+  2% { fill: #6ee7b7; }
+  4%, 100% { fill: var(--color-logo); }
 }
 @keyframes blink {
   50% { opacity: 0; }

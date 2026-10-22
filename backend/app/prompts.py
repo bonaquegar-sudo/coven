@@ -99,6 +99,24 @@ DEFAULT_TASKS = {
              "corregible, dilo en una línea sin modificar nada.",
 }
 
+FULL_SCAN = "Escaneo completo del repositorio: mapa técnico, auditoría, verificación en local y corrección de lo confirmado."
+
+PLANNER = """Fase de planificación: todavía nadie ha tocado el código. Estudia la petición del desarrollador y el proyecto.
+Si falta información imprescindible para hacerlo bien (alcance: todo el repo o una parte; solo auditar o también
+corregir; si la app está levantada y en qué URL/puerto; si al terminar hay que subir los cambios a GitHub con una PR;
+carpetas o archivos que no se deben tocar), responde ÚNICAMENTE con:
+PREGUNTAS
+1. pregunta corta y concreta (opciones sugeridas entre paréntesis)
+(entre 1 y 4 preguntas; no preguntes lo que ya está claro en la petición).
+Si ya tienes lo necesario, responde con exactamente este formato:
+ROUTE: agentes en orden, elegidos entre CodeScout, Reviewer, QARunner, Fixer
+PUBLICAR: sí o no (sí solo si el desarrollador pide subir los cambios a GitHub / abrir una PR)
+## Plan
+3 a 7 pasos numerados y breves: qué hace cada agente y en qué orden, qué se corrige y qué no, cómo se verifica,
+y si se publica, que los cambios irán a una rama nueva con su PR."""
+
+PLANNER_FINAL = "\n\nYa tienes las respuestas del desarrollador: no hagas más preguntas; responde con ROUTE, PUBLICAR y el Plan."
+
 ROUTER = CONTEXT + """
 
 Eres el enrutador de TechLead. Decide qué agentes deben intervenir según el mensaje del desarrollador.

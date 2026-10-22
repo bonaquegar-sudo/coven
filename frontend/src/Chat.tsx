@@ -91,8 +91,25 @@ function Head({ author, children }: { author: string; children?: React.ReactNode
   );
 }
 
-function Row({ m, head }: { m: Message; head: boolean }) {
-  const flagged = m.author === "system";
+const KIND = { questions: "Preguntas antes de empezar", plan: "Plan", approval: "Aprobación" } as const;
+
+// TechLead's approval request: one click answers it (the reply is a normal chat message, so text works too).
+function ApprovalButtons() {
+  const send = useCoven((s) => s.send);
+  return (
+    <div className="mt-2 flex gap-4 pl-10 text-xs">
+      <button onClick={() => send("aprobar")} className="flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 font-medium text-white hover:bg-emerald-500">
+        <Px icon={Check} size={12} /> Aprobar
+      </button>
+      <button onClick={() => send("saltar")} className="text-muted hover:text-ink">
+        Saltar Fixer
+      </button>
+    </div>
+  );
+}
+
+function Row({ m, head, waiting }: { m: Message; head: boolean; waiting?: boolean }) {
+  const flagged = m.author === "system" || (waiting && m.kind !== "plan");
   return (
     <div className={`group relative animate-fade-up px-4 py-0.5 hover:bg-white/[0.02] ${head ? "mt-3.5" : ""} ${flagged ? "border-l-2 border-amber-400/80" : "border-l-2 border-transparent"}`}>
       {head ? (
@@ -107,9 +124,12 @@ function Row({ m, head }: { m: Message; head: boolean }) {
           <Px icon={Check} size={14} /> Equipo terminado
         </div>
       )}
+      {m.kind && <div className="mt-1 pl-10 text-[11px] font-semibold uppercase tracking-wider text-muted">{KIND[m.kind]}</div>}
       <div className="pl-10">
         <Markdown text={m.content} />
       </div>
+      {waiting && m.kind === "approval" && <ApprovalButtons />}
+      {waiting && m.kind === "questions" && <p className="pl-10 text-[11px] text-amber-300">Responde en el chat para que TechLead prepare el plan.</p>}
     </div>
   );
 }
@@ -207,6 +227,28 @@ function RepoField() {
   );
 }
 
+// Start options, remembered between sessions.
+function StartOptions() {
+  const { prefs, setPrefs } = useCoven();
+  const opts: [keyof typeof prefs, string, string][] = [
+    ["plan", "Plan antes de empezar", "TechLead hace preguntas si falta información y publica un plan antes de tocar nada"],
+    ["approveFixes", "Aprobar cambios de Fixer", "El equipo se detiene antes de que Fixer modifique código hasta que apruebes"],
+    ["onlyChanges", "Solo archivos cambiados", "Analiza solo lo que cambia respecto a main según git (más rápido y barato)"],
+  ];
+  return (
+    <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-[11px]">
+      {opts.map(([k, label, tip]) => (
+        <button key={k} title={tip} onClick={() => setPrefs({ [k]: !prefs[k] })} aria-pressed={prefs[k]} className={`flex items-center gap-1.5 ${prefs[k] ? "text-ink" : "text-muted hover:text-ink"}`}>
+          <span className={`grid size-3 place-items-center rounded-sm border ${prefs[k] ? "border-emerald-500 bg-emerald-600 text-white" : "border-white/20"}`}>
+            {prefs[k] && <Px icon={Check} size={9} />}
+          </span>
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function Composer({ hero }: { hero?: boolean }) {
   const s = useCoven();
   const launch = useLaunch();
@@ -240,7 +282,8 @@ function Composer({ hero }: { hero?: boolean }) {
 }
 
 export default function Chat() {
-  const { active, messages, logs, socket, agents, query, newSince, sidebarOpen, projectPath, set } = useCoven();
+  const { active, messages, logs, socket, agents, query, newSince, sidebarOpen, projectPath, running, set } = useCoven();
+  const last = messages.filter((m) => m.channel === "general").at(-1); // a questions/approval message is open until answered
   const end = useRef<HTMLDivElement>(null);
   const q = query.trim().toLowerCase();
   const list = messages.filter((m) => m.channel === active && (!q || m.content.toLowerCase().includes(q)));
@@ -268,11 +311,12 @@ export default function Chat() {
         <PixelField />
         <div className="absolute left-3 top-3 z-10">{showSidebar}</div>
         <div className="relative m-auto w-full max-w-2xl animate-fade-up py-10">
-          <div className="mb-9 flex justify-center">
-            <PixelLogo cell={9} className="max-w-full" />
+          <div className="mb-10 flex justify-center">
+            <PixelLogo big cell={14} className="h-auto max-w-full" />
           </div>
           <RepoField />
           <Composer hero />
+          <StartOptions />
         </div>
       </main>
     );
@@ -302,7 +346,7 @@ export default function Chat() {
               <Fragment key={m.id}>
                 {newDay && (prev || i === 0) && <Divider label={longDate(m.ts)} />}
                 {isNew && <Divider label="nuevos" accent />}
-                <Row m={m} head={!!head} />
+                <Row m={m} head={!!head} waiting={!running && m.id === last?.id && !!m.kind} />
               </Fragment>
             );
           })}

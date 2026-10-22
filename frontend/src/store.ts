@@ -23,9 +23,10 @@ export const providerLabel = (p: string) => {
 };
 export const needsKey =(provider: string) => provider !== "ollama" && !SUBSCRIPTIONS.some((s) => s.id === provider);
 
-export type Message = { id: string; channel: string; author: string; content: string; ts: number; final?: boolean }; // ts in seconds; final = team done
+// ts in seconds; final = team done; kind marks TechLead's questions, plan and approval requests
+export type Message = { id: string; channel: string; author: string; content: string; ts: number; final?: boolean; kind?: "questions" | "plan" | "approval" };
 export type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
-export type FindingStatus = "DETECTED" | "CONFIRMED_BY_QA" | "PATCHED" | "VERIFIED" | "FALSE_POSITIVE";
+export type FindingStatus = "DETECTED" | "CONFIRMED_BY_QA" | "PATCHED" | "VERIFIED" | "FALSE_POSITIVE" | "ACCEPTED_RISK";
 export type Finding = {
   id: string;
   title: string;
@@ -39,6 +40,9 @@ export type Finding = {
   endpoint?: string;
   source: string;
   history: string[];
+  confidence?: "alta" | "media" | "baja";
+  compliance?: string[]; // ASVS / ISO 27001 / PCI DSS controls it breaks
+  accepted_reason?: string;
 };
 // One console entry: a test run or an AppSec scanner execution.
 export type LogEntry = {
@@ -46,7 +50,7 @@ export type LogEntry = {
   id?: string; running?: boolean; ms?: number; summary?: string; args?: Record<string, string>;
 };
 export type InspectorTab = "findings" | "console" | "diff";
-export type FindingFilter = { severity: Severity | null; status: FindingStatus | "OPEN" | null };
+export type FindingFilter = { severity: Severity | null; status: FindingStatus | "OPEN" | null; noise?: boolean }; // noise: show low-confidence
 export type AgentStatus = { status: "idle" | "thinking" | "tool"; detail: string };
 export type LLM = { provider: string; model: string; api_key: string; base_url: string };
 
@@ -54,6 +58,9 @@ const WS_URL = import.meta.env.VITE_COVEN_WS ?? "ws://127.0.0.1:8000/ws/session"
 export const API_URL = WS_URL.replace(/^ws/, "http").replace(/\/ws\/session$/, "");
 const LLM_KEY = "coven.llm";
 const REPO_KEY = "coven.repo";
+const PREFS_KEY = "coven.prefs";
+// plan: TechLead asks/plans before starting; approveFixes: pause before Fixer's patching flow; onlyChanges: git diff scope
+export type Prefs = { plan: boolean; approveFixes: boolean; onlyChanges: boolean };
 
 const load = <T,>(key: string, fallback: T): T => {
   try {
@@ -90,6 +97,8 @@ type State = {
   inspectorTab: InspectorTab;
   findingFilter: FindingFilter;
   settingsOpen: boolean;
+  prefs: Prefs;
+  setPrefs: (p: Partial<Prefs>) => void;
   set: (p: Partial<State>) => void;
   setLLM: (llm: LLM) => void;
   open: (channel: string) => void;
@@ -97,6 +106,7 @@ type State = {
   reset: () => void;
   send: (content: string) => void;
   fileAction: (type: "revert" | "accept", path: string) => void;
+  command: (msg: Record<string, unknown>) => void; // accept_risk / reopen / publish
 };
 
 const idle = () => Object.fromEntries(Object.keys(AGENTS).map((a) => [a, { status: "idle", detail: "" }])) as State["agents"];
@@ -173,6 +183,14 @@ export const useCoven = create<State>((set, get) => {
     inspectorTab: "findings",
     findingFilter: { severity: null, status: null },
     settingsOpen: false,
+    prefs: load<Prefs>(PREFS_KEY, { plan: true, approveFixes: true, onlyChanges: false }),
+    setPrefs: (p) => {
+      const prefs = { ...get().prefs, ...p };
+      try {
+        localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+      } catch {}
+      set({ prefs });
+    },
     set,
     // Provider/model/base URL survive reloads; the API key deliberately stays in memory only.
     setLLM: (llm) => {
@@ -189,14 +207,17 @@ export const useCoven = create<State>((set, get) => {
         return { active: channel, unread: { ...s.unread, [channel]: 0 }, newSince: n ? inChannel[inChannel.length - n]?.id ?? null : null };
       }),
     start: (request) => {
-      const { projectPath, llm, socket } = get();
+      const { projectPath, llm, socket, prefs } = get();
       socket?.close();
       const ws = new WebSocket(WS_URL);
       set({ ...fresh(), socket: ws, running: true, draft: "" });
       ws.onopen = () => {
         set({ connected: true });
         // With a request the backend skips the initial scan and routes it directly.
-        ws.send(JSON.stringify({ type: "start", project_path: projectPath, llm, request: request?.trim() || undefined }));
+        ws.send(JSON.stringify({
+          type: "start", project_path: projectPath, llm, request: request?.trim() || undefined,
+          plan: prefs.plan, approve_fixes: prefs.approveFixes, only_changes: prefs.onlyChanges,
+        }));
       };
       ws.onmessage = (m) => onEvent(JSON.parse(m.data));
       ws.onclose = () => {
@@ -217,6 +238,7 @@ export const useCoven = create<State>((set, get) => {
       set({ running: true, draft: "" });
     },
     fileAction: (type, path) => get().socket?.send(JSON.stringify({ type, path })),
+    command: (msg) => get().socket?.send(JSON.stringify(msg)),
   };
 });
 

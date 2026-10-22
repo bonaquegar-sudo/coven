@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Bug, Check, ChevronRight, Code, Globe, Key, Package, Search, Shield, Terminal, TestTube, Tools, Undo } from "pixelarticons/react";
+import { Bug, Check, ChevronRight, Code, Globe, Key, Package, Search, Shield, Terminal, TestTube, Tools, Undo, Upload } from "pixelarticons/react";
 import { useCoven, type Finding, type FindingStatus, type InspectorTab, type LogEntry, type Severity } from "./store";
 import { AgentAvatar, Px, type IconType } from "./icons";
 
@@ -19,7 +19,9 @@ const STATUS: Record<FindingStatus, { label: string; tone: string; bar: string }
   PATCHED: { label: "parcheado", tone: "text-amber-300", bar: "bg-amber-400" },
   VERIFIED: { label: "verificado", tone: "text-emerald-300", bar: "bg-emerald-400" },
   FALSE_POSITIVE: { label: "falso positivo", tone: "text-muted", bar: "bg-white/15" },
+  ACCEPTED_RISK: { label: "riesgo aceptado", tone: "text-muted", bar: "bg-white/15" },
 };
+const CONFIDENCE = { alta: "text-ink", media: "text-muted", baja: "text-muted/50" };
 const SOURCE: Record<string, { icon: IconType; label: string }> = {
   osv: { icon: Package, label: "OSV" },
   secrets: { icon: Key, label: "secretos" },
@@ -33,7 +35,7 @@ const TOOL_ICON: Record<string, IconType> = {
   verify_endpoint_security: Globe, report_finding: Bug, set_finding_status: Check,
 };
 export const toolIcon = (l: LogEntry) => (l.kind === "test" ? TestTube : TOOL_ICON[l.title] ?? Terminal);
-export const isOpen = (f: Finding) => f.status !== "VERIFIED" && f.status !== "FALSE_POSITIVE";
+export const isOpen = (f: Finding) => f.status !== "VERIFIED" && f.status !== "FALSE_POSITIVE" && f.status !== "ACCEPTED_RISK";
 
 // Flat design: full-width rows split by hairlines; no boxes around items.
 const row = "block w-full px-3 py-2.5 text-left hover:bg-white/[0.02] active:scale-100";
@@ -65,7 +67,7 @@ const Empty = ({ text }: { text: string }) => <p className="animate-fade px-3 pt
 function Lifecycle({ findings }: { findings: Finding[] }) {
   const { findingFilter, set } = useCoven();
   const count = (s: FindingStatus) => findings.filter((f) => f.status === s).length;
-  const real = findings.filter((f) => f.status !== "FALSE_POSITIVE").length;
+  const real = findings.filter((f) => f.status !== "FALSE_POSITIVE" && f.status !== "ACCEPTED_RISK").length;
   const pick = (status: FindingStatus) => set({ findingFilter: { ...findingFilter, status: findingFilter.status === status ? null : status } });
 
   return (
@@ -89,6 +91,8 @@ function Lifecycle({ findings }: { findings: Finding[] }) {
 function Filters({ findings }: { findings: Finding[] }) {
   const { findingFilter: f, set } = useCoven();
   const fp = findings.filter((x) => x.status === "FALSE_POSITIVE").length;
+  const accepted = findings.filter((x) => x.status === "ACCEPTED_RISK").length;
+  const noise = findings.filter((x) => x.confidence === "baja" && isOpen(x)).length;
   const setF = (p: Partial<typeof f>) => set({ findingFilter: { ...f, ...p } });
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-white/[0.06] px-3 py-2">
@@ -105,8 +109,23 @@ function Filters({ findings }: { findings: Finding[] }) {
           {fp} falsos +
         </button>
       )}
+      {accepted > 0 && (
+        <button onClick={() => setF({ status: f.status === "ACCEPTED_RISK" ? null : "ACCEPTED_RISK" })} aria-pressed={f.status === "ACCEPTED_RISK"} className={toggle(f.status === "ACCEPTED_RISK")}>
+          {accepted} aceptados
+        </button>
+      )}
+      {noise > 0 && (
+        <button
+          onClick={() => setF({ noise: !f.noise })}
+          aria-pressed={!!f.noise}
+          title="Hallazgos de baja confianza: coincidencias de patrón sin confirmar"
+          className={toggle(!!f.noise)}
+        >
+          {f.noise ? "ocultar" : "mostrar"} {noise} de baja confianza
+        </button>
+      )}
       {(f.severity || f.status) && (
-        <button onClick={() => set({ findingFilter: { severity: null, status: null } })} className="ml-auto text-[11px] text-muted hover:text-ink">
+        <button onClick={() => set({ findingFilter: { severity: null, status: null, noise: f.noise } })} className="ml-auto text-[11px] text-muted hover:text-ink">
           limpiar
         </button>
       )}
@@ -116,11 +135,15 @@ function Filters({ findings }: { findings: Finding[] }) {
 
 function FindingRow({ f }: { f: Finding }) {
   const [open, setOpen] = useState(false);
-  const set = useCoven((s) => s.set);
+  const { set, command } = useCoven();
   const src = SOURCE[f.source] ?? { icon: Shield, label: f.source };
+  const acceptRisk = () => {
+    const reason = window.prompt(`¿Por qué aceptas el riesgo de ${f.id}? No volverá a aparecer como abierto en este proyecto.`);
+    if (reason?.trim()) command({ type: "accept_risk", id: f.id, reason });
+  };
   const draft = (text: string) => set({ draft: text, active: "general" });
   const where = f.file_path ? ` en ${f.file_path}${f.line_number ? `:${f.line_number}` : ""}` : "";
-  const dim = f.status === "FALSE_POSITIVE" || f.status === "VERIFIED";
+  const dim = f.status === "FALSE_POSITIVE" || f.status === "VERIFIED" || f.status === "ACCEPTED_RISK";
 
   return (
     <article className={`${dim ? "opacity-60 hover:opacity-100" : ""} transition-opacity`}>
@@ -128,6 +151,7 @@ function FindingRow({ f }: { f: Finding }) {
         <div className="flex items-center gap-2 whitespace-nowrap text-[11px]">
           <span className={`font-semibold ${SEV_TEXT[f.severity] ?? SEV_TEXT.LOW}`}>{f.severity.toLowerCase()}</span>
           <span className="tabular-nums text-muted">{f.id}</span>
+          {f.confidence && <span title="Confianza del hallazgo" className={CONFIDENCE[f.confidence]}>confianza {f.confidence}</span>}
           <span title={src.label} className="text-muted/70">
             <Px icon={src.icon} size={11} />
           </span>
@@ -153,6 +177,8 @@ function FindingRow({ f }: { f: Finding }) {
             <pre className="max-h-48 overflow-auto whitespace-pre-wrap bg-black/25 px-2.5 py-2 text-[11px] leading-relaxed text-ink/80">{f.empirical_evidence}</pre>
           )}
           {f.fix && <p className="text-xs text-emerald-300/90">→ {f.fix}</p>}
+          {!!f.compliance?.length && <p className="text-[11px] text-muted">Incumple: <span className="text-ink/80">{f.compliance.join(" · ")}</span></p>}
+          {f.accepted_reason && <p className="text-[11px] text-muted">Riesgo aceptado: <span className="text-ink/80">{f.accepted_reason}</span></p>}
           {f.history?.length > 0 && (
             <ol className="space-y-0.5 border-l border-white/[0.08] pl-3 text-[11px] text-muted">
               {f.history.map((h, j) => <li key={j}>{h}</li>)}
@@ -168,7 +194,15 @@ function FindingRow({ f }: { f: Finding }) {
               <button onClick={() => draft(`@QARunner verifica ${f.id}${f.endpoint ? ` (${f.endpoint})` : ""}: ${f.title}`)} className="flex items-center gap-1.5 text-emerald-300 hover:text-emerald-200">
                 <Px icon={TestTube} size={12} /> Verificar con QARunner
               </button>
+              <button onClick={acceptRisk} className="ml-auto text-muted hover:text-ink">
+                Aceptar riesgo
+              </button>
             </div>
+          )}
+          {f.status === "ACCEPTED_RISK" && (
+            <button onClick={() => command({ type: "reopen", id: f.id })} className="text-[11px] text-muted hover:text-ink">
+              Reabrir
+            </button>
           )}
         </div>
       )}
@@ -184,6 +218,7 @@ function Findings() {
 
   const shown = findings
     .filter((f) => (!flt.severity || f.severity === flt.severity) && (!flt.status || (flt.status === "OPEN" ? isOpen(f) : f.status === flt.status)))
+    .filter((f) => flt.noise || f.confidence !== "baja" || !isOpen(f) || flt.status === f.status) // hide pattern-only noise by default
     .sort((a, b) => Number(!isOpen(a)) - Number(!isOpen(b)) || SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity));
 
   return (
@@ -269,12 +304,21 @@ function Console() {
 }
 
 function Diff() {
-  const { diff, fileAction, agents } = useCoven();
+  const { diff, fileAction, agents, command } = useCoven();
   const files = splitDiff(diff);
   const busy = agents.Fixer.status !== "idle";
   if (!files.length && !busy) return <Empty text="Fixer no ha modificado ningún archivo." />;
   return (
     <div className="divide-y divide-white/[0.06]">
+      {files.length > 0 && !busy && (
+        <button
+          onClick={() => command({ type: "publish" })}
+          title="Crea una rama nueva solo con estos cambios, hace commit, la sube y abre la PR"
+          className={`${row} flex items-center gap-2 text-xs text-emerald-300 hover:text-emerald-200`}
+        >
+          <Px icon={Upload} size={12} /> Subir a GitHub en una rama nueva y abrir PR
+        </button>
+      )}
       {files.map((f) => (
         <section key={f.path}>
           <div className="flex items-center gap-3 px-3 py-2">

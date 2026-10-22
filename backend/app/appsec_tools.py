@@ -24,6 +24,49 @@ OSV_URL = "https://api.osv.dev/v1/query"
 MAX_PACKAGES = 400  # ponytail: one OSV query per package; switch to /v1/querybatch past a few hundred deps
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
 STATUSES = ("DETECTED", "CONFIRMED_BY_QA", "PATCHED", "VERIFIED", "FALSE_POSITIVE")
+ACCEPTED = "ACCEPTED_RISK"  # set only by the developer from the UI, persisted in .coven/accepted.json
+
+# OWASP Top 10 2021 category -> (ASVS 4.0.3 chapter, ISO/IEC 27001:2022 Annex A control, PCI DSS 4.0 requirement)
+COMPLIANCE = {
+    "A01": ("ASVS V4 Control de acceso", "ISO 27001 A.5.15 / A.8.3", "PCI DSS 7.2"),
+    "A02": ("ASVS V6 Criptografía almacenada / V9 Comunicaciones", "ISO 27001 A.8.24", "PCI DSS 3.5 / 4.2"),
+    "A03": ("ASVS V5 Validación, saneado y codificación", "ISO 27001 A.8.28", "PCI DSS 6.2.4"),
+    "A04": ("ASVS V1 Arquitectura", "ISO 27001 A.8.27", "PCI DSS 6.2.1"),
+    "A05": ("ASVS V14 Configuración", "ISO 27001 A.8.9", "PCI DSS 2.2"),
+    "A06": ("ASVS V14.2 Dependencias", "ISO 27001 A.8.8", "PCI DSS 6.3.3"),
+    "A07": ("ASVS V2 Autenticación / V3 Sesiones", "ISO 27001 A.8.5", "PCI DSS 8.3"),
+    "A08": ("ASVS V10 Integridad del código / V14.2", "ISO 27001 A.8.28", "PCI DSS 6.3.2"),
+    "A09": ("ASVS V7 Errores y registro", "ISO 27001 A.8.15 / A.8.16", "PCI DSS 10.2"),
+    "A10": ("ASVS V12.6 SSRF", "ISO 27001 A.8.20 / A.8.28", "PCI DSS 6.2.4"),
+}
+CWE_CATEGORY = {"798": "SECRETS", "259": "SECRETS", "321": "SECRETS", "89": "A03", "79": "A03", "78": "A03", "94": "A03",
+                "95": "A03", "22": "A01", "639": "A01", "862": "A01", "306": "A07", "287": "A07", "327": "A02",
+                "328": "A02", "916": "A02", "693": "A05", "16": "A05", "918": "A10", "502": "A08", "352": "A01"}
+SECRETS_COMPLIANCE = ("ASVS V6.4 Gestión de secretos", "ISO 27001 A.5.17", "PCI DSS 8.6.2")
+
+
+def compliance(f: dict) -> list[str]:
+    """Controls a finding breaks, from its OWASP category or CWE (dependencies are always A06)."""
+    std = f.get("standard") or ""
+    cat = ("A06" if f.get("source") == "osv" else (m.group(1) if (m := re.search(r"\b(A(?:0[1-9]|10))(?::20\d\d)?\b", std))
+           else CWE_CATEGORY.get((re.search(r"CWE-(\d+)", std) or [None, ""])[1], "")))
+    if CWE_CATEGORY.get((re.search(r"CWE-(\d+)", std) or [None, ""])[1]) == "SECRETS" or f.get("source") == "secrets":
+        return list(SECRETS_COMPLIANCE)
+    return list(COMPLIANCE.get(cat, ()))
+
+
+def confidence(f: dict) -> str:
+    """alta: proven (exact CVE match or an empirical test); media: rule/manual review; baja: heuristic pattern."""
+    if f.get("source") in ("osv", "dast") or f.get("status") in ("CONFIRMED_BY_QA", "PATCHED", "VERIFIED"):
+        return "alta"
+    if f.get("source") in ("reviewer", "semgrep") or (f.get("source") == "secrets" and "entrop" not in f.get("title", "").lower()):
+        return "media"
+    return "baja"
+
+
+def fingerprint(key: str) -> str:
+    """Registry key without line numbers, so an accepted risk survives unrelated edits above it."""
+    return re.sub(r":\d+(?=:|$)", "", key)
 
 
 class SecurityFinding(TypedDict, total=False):
@@ -569,16 +612,56 @@ def route_matches(pattern: str, method: str, path: str) -> bool:
 class FindingRegistry:
     """Deduplicated SecurityFindings keyed by what was found (scanner+location), numbered COVEN-NNN."""
 
-    def __init__(self):
+    def __init__(self, accepted_file: Path | None = None):
         self.items: dict[str, SecurityFinding] = {}
+        self.only: set[str] | None = None  # diff-only scan: files allowed to produce findings
+        self.accepted_file = accepted_file
+        try:
+            self.accepted: dict[str, dict] = json.loads(accepted_file.read_text(encoding="utf-8")) if accepted_file else {}
+        except (OSError, ValueError):
+            self.accepted = {}
 
-    def add(self, key: str, status: str = "DETECTED", **fields) -> SecurityFinding:
+    def add(self, key: str, status: str = "DETECTED", **fields) -> SecurityFinding | None:
         if key in self.items:
             return self.items[key]
+        if self.only is not None and fields.get("file_path") and fields["file_path"].replace("\\", "/") not in self.only:
+            return None
         f: SecurityFinding = {"id": f"COVEN-{len(self.items) + 1:03d}", "status": status, "line_number": 0,
                               "file_path": "", "empirical_evidence": "", "history": [f"{fields.get('source', '?')}: {status}"], **fields}
+        f["key"] = key
+        if (acc := self.accepted.get(fingerprint(key))):
+            f["status"], f["accepted_reason"] = ACCEPTED, acc["reason"]
+            f["history"].append(f"{ACCEPTED} ← {acc['reason'][:160]}")
         self.items[key] = f
+        self._derive(f)
         return f
+
+    def _derive(self, f: SecurityFinding):
+        f["confidence"], f["compliance"] = confidence(f), compliance(f)
+
+    def accept_risk(self, fid: str, reason: str) -> SecurityFinding:
+        """Developer marks a finding as accepted risk; it stays closed in later scans of this project."""
+        f = self.get(fid)
+        if not reason.strip():
+            raise ValueError("indica el motivo por el que aceptas el riesgo")
+        self.accepted[fingerprint(f["key"])] = {"reason": reason.strip()[:500], "title": f["title"], "file": f.get("file_path", "")}
+        f["accepted_reason"] = reason.strip()[:500]
+        self._move(f, ACCEPTED, f"desarrollador: {reason.strip()[:300]}")
+        self._save()
+        return f
+
+    def reopen(self, fid: str) -> SecurityFinding:
+        f = self.get(fid)
+        self.accepted.pop(fingerprint(f["key"]), None)
+        f.pop("accepted_reason", None)
+        self._move(f, "DETECTED", "desarrollador: riesgo reabierto")
+        self._save()
+        return f
+
+    def _save(self):
+        if self.accepted_file:
+            self.accepted_file.parent.mkdir(exist_ok=True)
+            self.accepted_file.write_text(json.dumps(self.accepted, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def get(self, fid: str) -> SecurityFinding:
         f = next((f for f in self.items.values() if f["id"] == fid.strip().upper()), None)
@@ -603,6 +686,7 @@ class FindingRegistry:
         f["status"] = status
         f["empirical_evidence"] = (f["empirical_evidence"] + f"\n[{status}] {note}").strip()[-4000:]
         f["history"].append(f"{status} ← {note[:160]}")
+        self._derive(f)
 
     def apply_probe(self, method: str, endpoint: str, result: dict) -> list[SecurityFinding]:
         """Deterministic status changes from a verify_endpoint_security result."""

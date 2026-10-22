@@ -1,14 +1,19 @@
 """FastAPI server: one WebSocket per Coven session, streaming every agent event to the UI.
 
 Client -> server:
-  {"type": "start", "project_path": "...", "llm": {...}, "target_url"?: "...", "request"?: "..."}
-    (with a request the initial scan is skipped and TechLead routes the request directly)
+  {"type": "start", "project_path": "...", "llm": {...}, "target_url"?: "...", "request"?: "...",
+   "plan"?: bool, "approve_fixes"?: bool, "only_changes"?: bool, "diff_base"?: "origin/main"}
+    (plan: TechLead asks questions / posts a plan first; approve_fixes: pause before Fixer's patching flow;
+     only_changes: findings only in files changed per git; with a request the scan is skipped unless the plan routes it)
   {"type": "user_message", "channel": "general", "content": "@Fixer ..."}
   {"type": "revert" | "accept", "path": "src/x.ts"}
+  {"type": "accept_risk", "id": "COVEN-012", "reason": "..."} | {"type": "reopen", "id": "COVEN-012"}
+  {"type": "publish", "title"?: "...", "body"?: "..."}   (new branch + commit + push + PR with Coven's changes)
 Server -> client:
   channel_created | message | status | security_findings | tool_execution | test_output | diff | usage | error | done
     (usage: tokens of one LLM call — input, cache_write, cache_read, output, cost — tagged with the agent)
 """
+import asyncio
 import time
 import uuid
 from pathlib import Path
@@ -72,8 +77,11 @@ async def session(ws: WebSocket):
                         "llm": LLMConfig(**data.get("llm", {})),
                         "workspace": Workspace(data["project_path"]),
                     }}
-                    inputs = {"project_path": str(run_config["configurable"]["workspace"].root),
-                              "target_url": data.get("target_url") or ""}
+                    workspace = run_config["configurable"]["workspace"]
+                    if data.get("only_changes"):
+                        workspace.limit_to_changes(data.get("diff_base") or "")
+                    inputs = {"project_path": str(workspace.root), "target_url": data.get("target_url") or "",
+                              "plan": bool(data.get("plan")), "approve_fixes": bool(data.get("approve_fixes"))}
                     if data.get("request"):
                         msg = user_message(data["request"])
                         await ws.send_json({"type": "message", **msg})
@@ -90,6 +98,18 @@ async def session(ws: WebSocket):
                         workspace.revert(data["path"])
                     else:  # keep the change on disk, stop tracking it
                         workspace.originals.pop(data["path"], None)
+                    await ws.send_json({"type": "diff", "diff": workspace.get_git_diff(), "files": list(workspace.originals)})
+                    continue
+                elif kind in ("accept_risk", "reopen"):
+                    findings = run_config["configurable"]["workspace"].findings
+                    findings.accept_risk(data["id"], data.get("reason", "")) if kind == "accept_risk" else findings.reopen(data["id"])
+                    await ws.send_json({"type": "security_findings", "findings": list(findings.items.values())})
+                    continue
+                elif kind == "publish":
+                    workspace = run_config["configurable"]["workspace"]
+                    result = await asyncio.to_thread(workspace.git_publish, data.get("title") or "Coven: correcciones de seguridad",
+                                                     data.get("body") or "Cambios revisados en el panel Diff de Coven.")
+                    await ws.send_json({"type": "message", **user_message(f"**GitHub:** {result}") | {"author": "system"}})
                     await ws.send_json({"type": "diff", "diff": workspace.get_git_diff(), "files": list(workspace.originals)})
                     continue
                 else:

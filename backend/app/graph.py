@@ -1,4 +1,5 @@
 """CovenState and the 5-agent LangGraph. Nodes stream UI events through LangGraph's custom stream writer."""
+import asyncio
 import json
 import operator
 import re
@@ -13,7 +14,7 @@ from langgraph.graph import END, START, StateGraph
 
 from .appsec_tools import SecurityFinding, _vkey
 from .llm import LLMConfig, chat
-from .prompts import DEFAULT_TASKS, PROMPTS, ROUTER
+from .prompts import DEFAULT_TASKS, FULL_SCAN, PLANNER, PLANNER_FINAL, PROMPTS, ROUTER
 from .tools import Workspace, tool_schemas
 
 CHANNELS = ["general", "arquitectura", "auditoria", "tests", "parches"]
@@ -35,7 +36,7 @@ APPSEC_TOOLS = {"scan_dependencies_osv", "scan_secrets", "run_sast", "map_api_ro
                 "report_finding", "set_finding_status"}
 SCAN = ["CodeScout", "Reviewer", "QARunner", "Fixer"]
 SEV_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
-CLOSED = {"FALSE_POSITIVE", "VERIFIED"}
+CLOSED = {"FALSE_POSITIVE", "VERIFIED", "ACCEPTED_RISK"}
 MAX_TURNS = 12  # agent turns per user request; TechLead wraps up when hit
 MAX_STEPS = 10  # tool-calling rounds per agent turn
 
@@ -53,6 +54,13 @@ class CovenState(TypedDict, total=False):
     pending: list[str]     # agent queue decided by TechLead
     turns: int
     started: bool
+    plan: bool             # ask questions / post a plan before the first request (the UI turns it on)
+    approve_fixes: bool    # pause before Fixer's patching flow until the developer approves
+    goal: str              # the first request (+ answers to TechLead's questions) the plan was made for
+    awaiting: str | None   # "answers" | "fixer": the run ended waiting for the developer
+    queued: list[str]      # agents to resume with after an approval
+    approved: bool
+    publish: bool          # branch + commit + push + PR at the end
 
 
 def emit(event: dict):
@@ -232,21 +240,92 @@ async def lead_say(cfg: LLMConfig, instruction: str, state: CovenState) -> str:
         status("TechLead", "idle")
 
 
+PUBLISH_ASK = re.compile(r"pull request|\bPR\b|github|git push|\b(sube|subir|súbelo|subelo|publica|publicar)\b[^.\n]{0,40}"
+                         r"\b(git|repo|repositorio|rama|remoto|cambios)\b", re.I)
+YES = re.compile(r"^\s*(s[ií]|ok|vale|adelante|aprob|apruebo|dale|correcto|perfecto)\b", re.I)
+SKIP = re.compile(r"^\s*(no\b|salta|saltar|cancel|omit)", re.I)
+COVEN_ID = re.compile(r"COVEN-\d+", re.I)
+
+
+def needs_approval(state: CovenState) -> bool:
+    """Fixer's open-ended patching flow waits for a click; a request naming exact ids is already the approval."""
+    return bool(state.get("approve_fixes") and not state.get("approved") and not COVEN_ID.search(state.get("request") or ""))
+
+
+def fixer_candidates(state: CovenState) -> list[dict]:
+    """What Fixer's patching flow will most likely take (same rule as its task), shown before approving."""
+    rank = {"CONFIRMED_BY_QA": 0, "DETECTED": 1}
+    items = [f for f in state.get("security_findings") or [] if f["status"] in rank and (
+        f["status"] == "CONFIRMED_BY_QA" or (f["severity"] in ("CRITICAL", "HIGH") and f.get("confidence") != "baja"
+                                             and (f["source"] != "osv" or "Sin versión" not in f.get("fix", ""))))]
+    return sorted(items, key=lambda f: (rank[f["status"]], SEV_ORDER.get(f["severity"], 9)))[:5]
+
+
+async def planning(state: CovenState, cfg: LLMConfig, final: bool = False) -> CovenState:
+    """Questions first if something essential is missing, then a plan with the agent route; nobody touches code before."""
+    text = await lead_say(cfg, PLANNER + (PLANNER_FINAL if final else ""), {**state, "request": state["goal"]})
+    route = re.search(r"^\W*ROUTE:\s*(.*)$", text, re.M)
+    if not route and not final:
+        body = re.sub(r"^\W*PREGUNTAS\W*$", "", text, flags=re.M).strip()
+        msg = post("general", "TechLead", "Antes de empezar necesito aclarar esto:\n\n" + body, kind="questions")
+        return {"awaiting": "answers", "pending": [], "routed": True, "goal": state["goal"], "messages": [msg]}
+    names = list(dict.fromkeys(n for n in re.findall(r"\w+", route.group(1)) if n in AGENTS)) if route else []
+    publish = bool(PUBLISH_ASK.search(state["goal"]) or re.search(r"^\W*PUBLICAR:\W*s[ií]", text, re.M | re.I))
+    body = re.sub(r"^\W*(ROUTE|PUBLICAR):.*$", "", text, flags=re.M).strip()
+    msg = post("general", "TechLead", body + ("\n\nAl terminar subiré los cambios a una rama nueva y abriré la PR." if publish else ""),
+               kind="plan")
+    return {"awaiting": None, "routed": True, "pending": names or SCAN, "turns": 0, "goal": state["goal"],
+            "request": state["goal"], "publish": publish, "approved": False, "messages": [msg]}
+
+
 async def techlead(state: CovenState, config: RunnableConfig):
-    cfg = config["configurable"]["llm"]
+    cfg, ws = config["configurable"]["llm"], config["configurable"]["workspace"]
     boot: CovenState = {}
     if not state.get("started"):
         for c in CHANNELS:
             emit({"type": "channel_created", "channel": c})
-        plan = ("\n\nVoy directo con tu petición." if state.get("request") else
+        scope = (f" Alcance: solo los {len(ws.findings.only)} archivos cambiados según git."
+                 if ws.findings.only is not None else "")
+        plan = ("\n\nAntes de empezar preparo el plan." if state.get("plan") else
+                "\n\nVoy directo con tu petición." if state.get("request") else
                 "\n\n@CodeScout arranca el escaneo en #arquitectura; después @Reviewer audita en #auditoria, "
                 "@QARunner verifica en local en #tests y @Fixer corrige lo confirmado en #parches.")
         msg = post("general", "TechLead", f"Sesión iniciada sobre `{state['project_path']}`. Canales: "
-                   + ", ".join(f"#{c}" for c in CHANNELS) + "." + plan)
+                   + ", ".join(f"#{c}" for c in CHANNELS) + "." + scope + plan)
         boot = {"started": True, "channels": CHANNELS, "turns": 0, "messages": [msg]}
-        if not state.get("request"):
-            return {**boot, "pending": SCAN}
         state = {**state, "messages": [*state.get("messages", []), msg]}
+        if state.get("plan"):
+            upd = await planning({**state, "goal": state.get("request") or FULL_SCAN}, cfg)
+            return {**boot, **upd, "messages": [msg, *upd["messages"]]}
+        if not state.get("request"):
+            return {**boot, "pending": SCAN, "publish": False}
+        boot["publish"] = bool(PUBLISH_ASK.search(state["request"]))
+
+    # the run ended waiting for the developer; this message is their answer
+    if state.get("awaiting") == "answers" and state.get("request"):
+        return await planning({**state, "goal": f"{state['goal']}\n\nRespuestas del desarrollador:\n{state['request']}"},
+                              cfg, final=True)
+    if state.get("awaiting") == "fixer" and state.get("request"):
+        reply, queued = state["request"].strip(), state.get("queued") or []
+        if SKIP.match(reply):
+            msg = post("general", "TechLead", "De acuerdo: @Fixer no tocará el código; sigo con el resto del plan.")
+            return {"awaiting": None, "routed": True, "request": state.get("goal"), "approved": False,
+                    "pending": [n for n in queued if n != "Fixer"], "messages": [msg]}
+        notes = "" if YES.match(reply) else f"\n\nIndicaciones del desarrollador para Fixer: {reply}"
+        msg = post("general", "TechLead", "Aprobado. @Fixer, adelante." + (" Ten en cuenta sus indicaciones." if notes else ""))
+        return {"awaiting": None, "routed": True, "approved": True, "request": (state.get("goal") or "") + notes,
+                "pending": queued, "messages": [msg]}
+
+    pending = state.get("pending") or []
+    if pending[:1] == ["Fixer"] and needs_approval(state):
+        if not (cands := fixer_candidates(state)):
+            return {"approved": True}  # nothing to approve: Fixer runs and says so in one line
+        rows = "\n".join(f"| {f['id']} | {f['severity']} | {f['title'][:70]} | `{f.get('file_path') or f.get('endpoint', '')}` |"
+                         for f in cands)
+        msg = post("general", "TechLead", "**Aprobación necesaria antes de tocar código.** @Fixer va a corregir, como "
+                   "máximo, estos hallazgos:\n\n| Id | Sev. | Hallazgo | Ubicación |\n|---|---|---|---|\n" + rows
+                   + "\n\nResponde **aprobar**, **saltar** o escribe indicaciones para @Fixer.", kind="approval")
+        return {"awaiting": "fixer", "queued": pending, "pending": [], "messages": [msg]}
 
     if state.get("request") and not state.get("routed"):
         names = list(dict.fromkeys(n for n in re.findall(r"@(\w+)", state["request"]) if n in AGENTS))
@@ -258,17 +337,31 @@ async def techlead(state: CovenState, config: RunnableConfig):
             if first.strip().startswith("ROUTE:"):
                 names = [n for n in re.findall(r"\w+", first.split(":", 1)[1]) if n in AGENTS]
             reply = rest.strip() or text
-        return {**boot, "routed": True, "pending": names, "turns": 0,
+        explicit = "Fixer" in re.findall(r"@(\w+)", state["request"])  # the developer called Fixer: that is the approval
+        return {**boot, "routed": True, "pending": names, "turns": 0, "approved": explicit,
+                "publish": bool(PUBLISH_ASK.search(state["request"])),
                 "messages": [*boot.get("messages", []), post("general", "TechLead", reply)]}
 
     over = state.get("turns", 0) >= MAX_TURNS
     text = await lead_say(cfg, "Redacta el resumen final para #general (estado, riesgos principales, siguiente paso)."
                           + (" Se alcanzó el límite de turnos: indica que el equipo se detuvo." if over else ""), state)
-    return {"pending": [], "request": None, "messages": [post("general", "TechLead", f"{text}\n\n{report(state)}", final=True)]}
+    summary = f"{text}\n\n{report(state)}"
+    if state.get("publish"):
+        try:
+            title = f"Coven: correcciones de seguridad ({sum(f['status'] == 'PATCHED' for f in state.get('security_findings') or [])} hallazgos)"
+            result = await asyncio.to_thread(ws.git_publish, title, summary)
+        except Exception as e:
+            result = f"no se pudo publicar: {e}"
+        emit({"type": "diff", "diff": ws.get_git_diff(), "files": list(ws.originals)})
+        summary += f"\n\n**GitHub:** {result}"
+    return {"pending": [], "request": None, "approved": False, "publish": False,
+            "messages": [post("general", "TechLead", summary, final=True)]}
 
 
 def next_agent(state: CovenState) -> str:
     pending = state.get("pending") or []
+    if pending[:1] == ["Fixer"] and needs_approval(state):
+        return "TechLead"  # approval gate
     return pending[0] if pending and state.get("turns", 0) < MAX_TURNS else "TechLead"
 
 

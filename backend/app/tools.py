@@ -9,6 +9,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from . import appsec_tools as appsec
@@ -132,8 +133,60 @@ class Workspace:
         if not self.root.is_dir():
             raise ValueError(f"No existe el directorio: {root}")
         self.originals: dict[str, str | None] = {}  # rel path -> content before Coven touched it (None = new file)
-        self.findings = FindingRegistry()
+        self.findings = FindingRegistry(self.root / ".coven" / "accepted.json")
         self.routes: list[dict] = []  # last map_api_routes result
+
+    # ---- git: diff-only scans and publishing Coven's changes. Plain subprocess, never through the agents' tools.
+
+    def _git(self, *args: str, check: bool = True) -> str:
+        r = subprocess.run(["git", *args], cwd=self.root, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=120, stdin=subprocess.DEVNULL)
+        if check and r.returncode:
+            raise ValueError(f"git {args[0]}: {(r.stderr or r.stdout).strip()[:400]}")
+        return r.stdout.strip()
+
+    def changed_files(self, base: str = "") -> set[str]:
+        """Files changed vs base (default: the merge-base with main/master) plus uncommitted and untracked ones."""
+        if not base:
+            for ref in ("origin/main", "origin/master", "main", "master"):
+                if self._git("rev-parse", "--verify", "--quiet", ref, check=False):
+                    base = self._git("merge-base", "HEAD", ref, check=False)
+                    break
+        files = set(self._git("diff", "--name-only", base or "HEAD").splitlines()) if base or self._git(
+            "rev-parse", "--verify", "--quiet", "HEAD", check=False) else set()
+        files |= set(self._git("ls-files", "--others", "--exclude-standard").splitlines())
+        return {f for f in files if f}
+
+    def limit_to_changes(self, base: str = "") -> set[str]:
+        self.findings.only = self.changed_files(base)
+        return self.findings.only
+
+    def git_publish(self, title: str, body: str) -> str:
+        """New branch with only Coven's changes, commit, push (never force, never the current branch) and a PR via gh."""
+        files = [rel for rel in self.originals if (self.root / rel).exists() or self.originals[rel] is not None]
+        if not files:
+            raise ValueError("no hay cambios de Coven que publicar")
+        self._git("rev-parse", "--git-dir")
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "fix"
+        branch = f"coven/{slug}-{time.strftime('%Y%m%d-%H%M%S')}"
+        # the developer stays on the new branch: the working tree keeps exactly what they reviewed in the Diff panel
+        self._git("switch", "-c", branch)
+        self._git("add", "--", *files)
+        identity = [] if self._git("config", "user.email", check=False) else ["-c", "user.name=Coven", "-c", "user.email=coven@localhost"]
+        self._git(*identity, "commit", "-m", title, "-m", body)
+        self.originals.clear()  # committed: nothing left to accept/revert
+        remote = self._git("remote", check=False).splitlines()
+        if not remote:
+            return f"Rama {branch} creada con el commit (sin remoto configurado: no se ha subido)."
+        self._git("push", "-u", remote[0], branch)
+        gh = shutil.which("gh")
+        if gh:
+            r = subprocess.run([gh, "pr", "create", "--head", branch, "--title", title, "--body", body], cwd=self.root,
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+            if r.returncode == 0:
+                return f"PR abierta: {r.stdout.strip().splitlines()[-1]} (rama {branch})"
+            return f"Rama {branch} subida; no se pudo abrir la PR con gh: {(r.stderr or r.stdout).strip()[:300]}"
+        return f"Rama {branch} subida a {remote[0]}. Instala gh para abrir la PR automáticamente."
 
     async def call(self, name: str, args: dict, agent: str = "") -> str:
         if name not in SPECS:
@@ -304,6 +357,8 @@ class Workspace:
                                   standard=v["cve"], file_path=v["manifest"], line_number=v["line"],
                                   empirical_evidence=f"OSV {v['id']}: {v['summary']}",
                                   fix=f"Actualizar {v['name']} a {v['fixed']}" if v["fixed"] else "Sin versión corregida publicada")
+            if not f:
+                continue  # diff-only scan and this manifest did not change
             groups.setdefault((v["ecosystem"], v["name"], v["version"], v["manifest"], v["line"]), []).append((f["id"], v))
         # one line per package (the per-CVE detail lives in the registry/UI): far fewer tokens, same decisions
         rows = []
@@ -330,7 +385,7 @@ class Workspace:
                                                         "credencial si se compartió" if h.get("ignored") else "")
                                                      + (". Código de test: no llega a producción" if h.get("test_code") else ""),
                                   fix="Mover a variables de entorno / gestor de secretos y rotar la credencial")
-            if h["severity"] != "LOW":
+            if f and h["severity"] != "LOW":
                 rows.append(f"{f['id']} [{h['severity']}] {h['type']} en {h['file']}:{h['line']} -> {h['masked']}")
         low = len(hits) - len(rows)
         return "\n".join([f"{len(hits)} posibles secretos", *rows]
@@ -344,7 +399,7 @@ class Workspace:
                                   title=h["title"], severity=h["severity"], standard=h["standard"], file_path=h["file"],
                                   line_number=h["line"], empirical_evidence=h["snippet"] and f"`{h['snippet']}`",
                                   **({"endpoint": h["endpoint"]} if h.get("endpoint") else {}))
-            if h["severity"] != "LOW":
+            if f and h["severity"] != "LOW":
                 rows.append(f"{f['id']} [{h['severity']}] {h['standard']} {h['title']} ({h['file']}:{h['line']})"
                             + (f"\n    {h['snippet']}" if h["snippet"] else ""))
         low = len(r["findings"]) - len(rows)
@@ -352,7 +407,8 @@ class Workspace:
                          + ([f"+{low} LOW (código de test): en el registro, no listados"] if low else []))
 
     def map_api_routes(self) -> str:
-        self.routes = appsec.map_api_routes(self.root)
+        only = self.findings.only
+        self.routes = [r for r in appsec.map_api_routes(self.root) if only is None or r["file"] in only]
         # routes with auth are listed only as a count: the model needs the unprotected ones
         open_ = [r for r in self.routes if not r["auth"]]
         rows = [f"{r['method']:7} {r['path']:40} SIN AUTH {r['file']}:{r['line']}" for r in open_[:120]]
@@ -381,6 +437,8 @@ class Workspace:
         f = self.findings.add(f"reviewer:{file_path}:{line}:{title.lower()}", source="reviewer", title=title,
                               severity=severity, standard=standard, file_path=file_path, line_number=line,
                               empirical_evidence=evidence, fix=fix, **({"endpoint": endpoint.strip()} if endpoint.strip() else {}))
+        if not f:
+            return f"{file_path} no ha cambiado: fuera del alcance de este escaneo (solo cambios)"
         return f"{f['id']} registrado [{f['severity']}] {f['title']}"
 
     def set_finding_status(self, id: str, status: str, evidence: str, agent: str) -> str:
@@ -389,7 +447,7 @@ class Workspace:
 
     def list_findings(self) -> str:
         items = list(self.findings.items.values())
-        shown = [f for f in items if f["severity"] != "LOW" and f["status"] != "FALSE_POSITIVE"]
+        shown = [f for f in items if f["severity"] != "LOW" and f["status"] not in ("FALSE_POSITIVE", appsec.ACCEPTED)]
         return "\n".join([f"{len(items)} hallazgos ({len(items) - len(shown)} LOW o descartados, no listados)", *(
             f"{f['id']} [{f['severity']}][{f['status']}] {f['title']} — {f['file_path']}:{f['line_number']} ({f['standard']})"
             + (f" endpoint {f['endpoint']}" if f.get("endpoint") else "") for f in shown)])

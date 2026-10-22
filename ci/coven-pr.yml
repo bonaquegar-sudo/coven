@@ -1,0 +1,34 @@
+# Coven en cada pull request: copia este archivo a .github/workflows/coven.yml en tu repo.
+# Solo revisa los archivos que cambian en la PR, comenta el informe y falla si hay hallazgos HIGH o CRITICAL
+# (con confianza media o alta). Los riesgos aceptados en .coven/accepted.json no bloquean.
+name: Coven security review
+on: pull_request
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  coven:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # el historial hace falta para calcular los archivos cambiados
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Instalar Coven
+        run: |
+          git clone --depth 1 https://github.com/bonaquegar-sudo/coven "$RUNNER_TEMP/coven"
+          pip install -r "$RUNNER_TEMP/coven/backend/requirements.txt"
+      - name: Revisar la PR
+        id: coven
+        working-directory: ${{ runner.temp }}/coven/backend
+        # Para añadir la auditoría con agentes: --llm anthropic y el secreto ANTHROPIC_API_KEY.
+        run: python -m app.cli "$GITHUB_WORKSPACE" --diff-base "origin/${{ github.base_ref }}" --fail-on high --out "$RUNNER_TEMP/coven.md"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Comentar en la PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr comment ${{ github.event.pull_request.number }} --body-file "$RUNNER_TEMP/coven.md" --edit-last --create-if-none
