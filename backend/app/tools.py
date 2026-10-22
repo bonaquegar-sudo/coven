@@ -26,8 +26,9 @@ TEST_COMMANDS = [
 SPECS = {
     "list_directory": ("Árbol de directorios (ignora node_modules, .git, etc.).",
                        {"path": "Ruta relativa al proyecto, '.' por defecto"}, []),
-    "read_file": ("Lee un archivo de texto con números de línea.",
-                  {"path": "Ruta relativa", "start_line": "Primera línea (1 por defecto)"}, ["path"]),
+    "read_file": ("Lee un archivo de texto con números de línea (200 líneas por defecto; pide solo el rango que necesites).",
+                  {"path": "Ruta relativa", "start_line": "Primera línea (1 por defecto)",
+                   "end_line": "Última línea (máx. 400 por lectura)"}, ["path"]),
     "find_files": ("Busca archivos por patrón glob sobre la ruta relativa, ej. '*.py' o 'src/**/*.ts'.",
                    {"pattern": "Patrón glob"}, ["pattern"]),
     "search_code": ("Busca una regex en el código. Devuelve archivo:línea: texto.",
@@ -117,6 +118,7 @@ class Workspace:
             raise ValueError(f"No existe el directorio: {root}")
         self.originals: dict[str, str | None] = {}  # rel path -> content before Coven touched it (None = new file)
         self.findings = FindingRegistry()
+        self.routes: list[dict] = []  # last map_api_routes result
 
     async def call(self, name: str, args: dict, agent: str = "") -> str:
         if name not in SPECS:
@@ -158,11 +160,12 @@ class Workspace:
         walk(base, 0)
         return "\n".join(lines[:500]) or "(vacío)"
 
-    def read_file(self, path: str, start_line: str | int = 1) -> str:
-        start = max(int(start_line), 1)
+    def read_file(self, path: str, start_line: str | int = 1, end_line: str | int = 0) -> str:
+        start = max(int(start_line or 1), 1)
+        end = min(int(end_line or start + 199), start + 399)
         text = self._path(path).read_text(encoding="utf-8", errors="replace").splitlines()
-        chunk = text[start - 1:start + 399]
-        more = f"\n... ({len(text)} líneas en total)" if start + 399 < len(text) else ""
+        chunk = text[start - 1:end]
+        more = f"\n... ({len(text)} líneas en total)" if end < len(text) else ""
         return "\n".join(f"{i}: {l}" for i, l in enumerate(chunk, start)) + more
 
     def find_files(self, pattern: str) -> str:
@@ -237,15 +240,22 @@ class Workspace:
 
     async def scan_dependencies_osv(self) -> str:
         r = await appsec.scan_dependencies_osv(self.root)
-        rows = []
+        groups: dict[tuple, list] = {}
         for v in r["vulnerabilities"]:
             f = self.findings.add(f"osv:{v['ecosystem']}:{v['name']}:{v['id']}", source="osv",
                                   title=f"{v['name']}@{v['version']} vulnerable ({v['id']})", severity=v["severity"],
                                   standard=v["cve"], file_path=v["manifest"], line_number=v["line"],
                                   empirical_evidence=f"OSV {v['id']}: {v['summary']}",
                                   fix=f"Actualizar {v['name']} a {v['fixed']}" if v["fixed"] else "Sin versión corregida publicada")
-            rows.append(f"{f['id']} [{v['severity']}] {v['ecosystem']} {v['name']}@{v['version']} {v['cve']} "
-                        f"-> {v['fixed'] or 'sin fix'} ({v['manifest']}:{v['line']}) {v['summary'][:120]}")
+            groups.setdefault((v["ecosystem"], v["name"], v["version"], v["manifest"], v["line"]), []).append((f["id"], v))
+        # one line per package (the per-CVE detail lives in the registry/UI): far fewer tokens, same decisions
+        rows = []
+        for (eco, name, ver, manifest, line), items in groups.items():
+            worst = min(items, key=lambda x: appsec.SEVERITIES.index(x[1]["severity"]))[1]
+            fixes = [v["fixed"] for _, v in items if v["fixed"]]
+            rows.append(f"{','.join(i for i, _ in items)} [{worst['severity']}] {eco} {name}@{ver} "
+                        f"-> {max(fixes, key=appsec._vkey) if fixes else 'sin fix'} ({manifest}:{line}) "
+                        f"{len(items)} avisos: {', '.join(v['cve'] for _, v in items)[:160]} — {worst['summary'][:90]}")
         head = f"{len(r['vulnerabilities'])} vulnerabilidades en {r['scanned']} dependencias fijadas (OSV.dev)"
         errors = f"\nErrores de red: {', '.join(r['errors'][:10])}" if r["errors"] else ""
         return "\n".join([head, *rows]) + errors
@@ -263,10 +273,11 @@ class Workspace:
                                                         "credencial si se compartió" if h.get("ignored") else "")
                                                      + (". Código de test: no llega a producción" if h.get("test_code") else ""),
                                   fix="Mover a variables de entorno / gestor de secretos y rotar la credencial")
-            rows.append(f"{f['id']} [{h['severity']}] {h['type']} en {h['file']}:{h['line']} -> {h['masked']}"
-                        + (" (ignorado por git)" if h.get("ignored") else "")
-                        + (" (código de test)" if h.get("test_code") else ""))
-        return "\n".join([f"{len(hits)} posibles secretos", *rows])
+            if h["severity"] != "LOW":
+                rows.append(f"{f['id']} [{h['severity']}] {h['type']} en {h['file']}:{h['line']} -> {h['masked']}")
+        low = len(hits) - len(rows)
+        return "\n".join([f"{len(hits)} posibles secretos", *rows]
+                         + ([f"+{low} LOW (código de test o ignorados por git): en el registro, no listados"] if low else []))
 
     def run_sast(self) -> str:
         r = appsec.run_static_ast_rules(self.root)
@@ -276,14 +287,20 @@ class Workspace:
                                   title=h["title"], severity=h["severity"], standard=h["standard"], file_path=h["file"],
                                   line_number=h["line"], empirical_evidence=h["snippet"] and f"`{h['snippet']}`",
                                   **({"endpoint": h["endpoint"]} if h.get("endpoint") else {}))
-            rows.append(f"{f['id']} [{h['severity']}] {h['standard']} {h['title']} ({h['file']}:{h['line']})"
-                        + (f"\n    {h['snippet']}" if h["snippet"] else ""))
-        return "\n".join([f"{len(r['findings'])} hallazgos SAST (motor: {r['engine']})", *rows])
+            if h["severity"] != "LOW":
+                rows.append(f"{f['id']} [{h['severity']}] {h['standard']} {h['title']} ({h['file']}:{h['line']})"
+                            + (f"\n    {h['snippet']}" if h["snippet"] else ""))
+        low = len(r["findings"]) - len(rows)
+        return "\n".join([f"{len(r['findings'])} hallazgos SAST (motor: {r['engine']})", *rows]
+                         + ([f"+{low} LOW (código de test): en el registro, no listados"] if low else []))
 
     def map_api_routes(self) -> str:
-        routes = appsec.map_api_routes(self.root)
-        rows = [f"{r['method']:7} {r['path']:40} {'auth' if r['auth'] else 'SIN AUTH':8} {r['file']}:{r['line']}" for r in routes]
-        return "\n".join([f"{len(routes)} rutas API detectadas", *rows])
+        self.routes = appsec.map_api_routes(self.root)
+        # routes with auth are listed only as a count: the model needs the unprotected ones
+        open_ = [r for r in self.routes if not r["auth"]]
+        rows = [f"{r['method']:7} {r['path']:40} SIN AUTH {r['file']}:{r['line']}" for r in open_[:120]]
+        return "\n".join([f"{len(self.routes)} rutas API detectadas ({len(self.routes) - len(open_)} con auth, no listadas)",
+                          *rows] + ([f"+{len(open_) - 120} rutas sin auth más"] if len(open_) > 120 else []))
 
     async def verify_endpoint_security(self, base_url: str, endpoint: str, method: str = "GET") -> str:
         r = await appsec.verify_endpoint_security(base_url, endpoint, method)
@@ -315,6 +332,7 @@ class Workspace:
 
     def list_findings(self) -> str:
         items = list(self.findings.items.values())
-        return "\n".join([f"{len(items)} hallazgos", *(
+        shown = [f for f in items if f["severity"] != "LOW" and f["status"] != "FALSE_POSITIVE"]
+        return "\n".join([f"{len(items)} hallazgos ({len(items) - len(shown)} LOW o descartados, no listados)", *(
             f"{f['id']} [{f['severity']}][{f['status']}] {f['title']} — {f['file_path']}:{f['line_number']} ({f['standard']})"
-            + (f" endpoint {f['endpoint']}" if f.get("endpoint") else "") for f in items)])
+            + (f" endpoint {f['endpoint']}" if f.get("endpoint") else "") for f in shown)])

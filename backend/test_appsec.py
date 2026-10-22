@@ -189,6 +189,20 @@ with tempfile.TemporaryDirectory() as d:
     assert auth == {("GET", "/rest/basket/:id", 3): True, ("GET", "/api/Deliverys", 4): False, ("GET", "/api/Users", 5): True,
                     ("GET", "/api/Users", 6): True, ("POST", "/api/Users", 7): False}, auth
 
+# app.route() chains and finale/epilogue generated CRUD (template endpoints expanded from `name:` literals)
+with tempfile.TemporaryDirectory() as d:
+    Path(d, "server.ts").write_text(
+        "app.route('/api/Users/:id')\n  .get(security.isAuthorized())\n  .put(security.denyAll())\n"
+        "app.route('/api/Hints/:id').get(security.denyAll())\n"
+        "app.post('/api/Products', security.isAuthorized())\n"
+        "const models = [{ name: 'User', model: U }, { name: 'Product', model: P }]\n"
+        "for (const { name, model } of models) {\n"
+        "  finale.resource({\n    model,\n    endpoints: [`/api/${name}s`, `/api/${name}s/:id`]\n  })\n}\n")
+    auth = {(r["method"], r["path"]): r["auth"] for r in appsec.map_api_routes(d)}
+    assert auth[("GET", "/api/Users/:id")] and auth[("PUT", "/api/Users/:id")] and auth[("GET", "/api/Hints/:id")]
+    assert not auth[("DELETE", "/api/Users/:id")] and not auth[("PUT", "/api/Products/:id")] and auth[("POST", "/api/Products")]
+    assert not auth[("GET", "/api/Users")] and ("POST", "/api/Users") in auth and len(auth) == 11, auth
+
 # an anonymous 401 disproves missing auth, never an IDOR on the same endpoint
 reg = appsec.FindingRegistry()
 idor = reg.add("idor", title="IDOR", severity="HIGH", standard="OWASP A01:2021 / CWE-639", endpoint="GET /rest/basket/:id")

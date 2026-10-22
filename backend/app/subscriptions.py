@@ -44,8 +44,10 @@ def status() -> dict:
     return {p: {"installed": bool(shutil.which(exe)), "login": hint, "label": label} for p, (exe, hint, label) in CLIS.items()}
 
 
-def render(messages: list[dict], tools: list[dict] | None) -> str:
-    """Flatten a chat (system, user, assistant tool calls, tool results) into one prompt."""
+def render(messages: list[dict], tools: list[dict] | None) -> list[str]:
+    """Flatten a chat (system, user, assistant tool calls, tool results) into prompt blocks, one per message.
+    Blocks never change once written, so the CLI's prompt cache reuses the whole prefix on the next tool round
+    (one big string that grows each round is a cache miss every time)."""
     names, parts = {}, []
     for m in messages:
         role, content = m["role"], m.get("content") or ""
@@ -67,7 +69,7 @@ def render(messages: list[dict], tools: list[dict] | None) -> str:
         else:
             parts.append(f"# Usuario\n{content}")
     parts.append("# Tu turno\nResponde ahora siguiendo las instrucciones.")
-    return "\n\n".join(parts)
+    return parts
 
 
 def parse(text: str) -> Message:
@@ -98,26 +100,36 @@ def _fail(provider: str, detail: str):
     raise RuntimeError(f"{CLIS[provider][2]}: {detail.strip()[-400:] or 'sin salida'}" + (f" — {hint}" if auth else ""))
 
 
-def complete(provider: str, model: str, prompt: str) -> str:
-    """Blocking: one headless turn through the vendor CLI. Run it in a thread."""
+def complete(provider: str, model: str, blocks: list[str]) -> tuple[str, dict]:
+    """Blocking: one headless turn through the vendor CLI. Run it in a thread. Returns (text, usage); usage may be {}."""
     exe = shutil.which(CLIS[provider][0])
     if not exe:
         raise RuntimeError(f"No encuentro `{CLIS[provider][0]}`: {CLIS[provider][1]}")
+    prompt = "\n\n".join(blocks)
     with tempfile.TemporaryDirectory(prefix="coven-llm-") as cwd:  # nothing of the repo is reachable from here
         if provider == "claude-sub":
-            argv = [exe, "-p", "--output-format", "json", "--tools", "", "--no-session-persistence",
+            argv = [exe, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+                    "--tools", "", "--no-session-persistence",
                     "--setting-sources", "", "--strict-mcp-config",
                     "--system-prompt", "Eres el motor de lenguaje de Coven. Sigue las instrucciones del mensaje."]
             # headless default output cap cuts long reports with many tool calls
-            r = _run(argv + (["--model", model] if model else []), prompt, cwd, {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000"})
-            try:
-                out = json.loads(r.stdout)
-            except ValueError:
+            line = json.dumps({"type": "user", "message": {"role": "user", "content": [
+                {"type": "text", "text": b} for b in blocks]}}, ensure_ascii=False)
+            r = _run(argv + (["--model", model] if model else []), line + "\n", cwd, {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000"})
+            out = next((json.loads(raw) for raw in reversed(r.stdout.splitlines())
+                        if raw.startswith("{") and '"type":"result"' in raw.replace(" ", "")), None)
+            if out is None:
                 _fail(provider, r.stderr or r.stdout)
             if out.get("is_error"):
                 _fail(provider, str(out.get("result") or out))
-            cut = "\n\n[respuesta truncada por el límite de salida: divide el trabajo en pasos más cortos]"
-            return (out.get("result") or "") + (cut if out.get("stop_reason") == "max_tokens" else "")
+            cut = {"max_tokens": "\n\n[respuesta truncada por el límite de salida: divide el trabajo en pasos más cortos]",
+                   "refusal": "\n\n[respuesta cortada por el filtro de seguridad del proveedor: reformula en términos "
+                              "defensivos (impacto y corrección), sin payloads ni pasos de explotación]"}
+            u = out.get("usage") or {}
+            usage = {"input": u.get("input_tokens", 0), "cache_write": u.get("cache_creation_input_tokens", 0),
+                     "cache_read": u.get("cache_read_input_tokens", 0), "output": u.get("output_tokens", 0),
+                     "cost": out.get("total_cost_usd"), "model": next(iter(out.get("modelUsage") or {}), model)}
+            return (out.get("result") or "") + cut.get(out.get("stop_reason"), ""), usage
         if provider == "gemini-sub":
             argv = [exe, "--mode", "plan", "--input-format", "stream-json", "--output-format", "stream-json", "-p", ""]
             line = json.dumps({"event": "user", "message": {"role": "user", "content": prompt}}, ensure_ascii=False)
@@ -127,7 +139,7 @@ def complete(provider: str, model: str, prompt: str) -> str:
                     res = json.loads(raw)["result"]
                     if res.get("status") != "SUCCESS":
                         _fail(provider, res.get("error") or json.dumps(res))
-                    return res.get("response") or ""
+                    return res.get("response") or "", {}
             _fail(provider, r.stderr or r.stdout)
         # chatgpt-sub — ponytail: built from Codex CLI docs, not run here (codex isn't installed on this machine)
         last = Path(cwd, "last.txt")
@@ -136,4 +148,4 @@ def complete(provider: str, model: str, prompt: str) -> str:
         r = _run(argv, prompt, cwd)
         if r.returncode != 0 or not last.exists():
             _fail(provider, r.stderr or r.stdout)
-        return last.read_text(encoding="utf-8")
+        return last.read_text(encoding="utf-8"), {}

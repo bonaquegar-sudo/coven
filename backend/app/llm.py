@@ -38,15 +38,31 @@ class LLMConfig:
 
 
 async def chat(cfg: LLMConfig, messages: list[dict], tools: list[dict] | None = None):
-    """One completion; returns the assistant message (content + optional tool_calls)."""
+    """One completion; returns the assistant message (content, optional tool_calls, usage)."""
     if cfg.provider in subscriptions.CLIS:
-        text = await asyncio.to_thread(subscriptions.complete, cfg.provider, cfg.model, subscriptions.render(messages, tools))
-        return subscriptions.parse(text)
+        text, usage = await asyncio.to_thread(subscriptions.complete, cfg.provider, cfg.model,
+                                              subscriptions.render(messages, tools))
+        msg = subscriptions.parse(text)
+        msg.usage = usage
+        return msg
+    # Anthropic only caches what is marked: system+tools and the growing tail of the tool loop (OpenAI/Gemini cache on their own)
+    cache = ({"cache_control_injection_points": [{"location": "message", "role": "system"}, {"location": "message", "index": -1}]}
+             if cfg.provider == "anthropic" or cfg.model.startswith("anthropic/") else {})
     resp = await litellm.acompletion(
         model=PROVIDERS[cfg.provider][0] + cfg.model,
         messages=messages,
         tools=tools or None,
         api_key=cfg.api_key,
         api_base=cfg.base_url or (OLLAMA_URL if cfg.provider == "ollama" else None),
+        **cache,
     )
-    return resp.choices[0].message
+    m, u = resp.choices[0].message, resp.usage
+    cached = getattr(getattr(u, "prompt_tokens_details", None), "cached_tokens", 0) or 0
+    write = getattr(u, "cache_creation_input_tokens", 0) or 0
+    try:
+        cost = litellm.completion_cost(resp)
+    except Exception:  # unknown/local model: no price table
+        cost = None
+    return subscriptions.Message(content=m.content, tool_calls=m.tool_calls, usage={
+        "input": u.prompt_tokens - cached - write, "cache_write": write, "cache_read": cached,
+        "output": u.completion_tokens, "cost": cost, "model": cfg.model})

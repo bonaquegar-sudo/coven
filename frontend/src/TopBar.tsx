@@ -20,7 +20,14 @@ function useProjectCheck() {
 
 export default function TopBar() {
   useProjectCheck();
-  const { findings, inspectorOpen, set } = useCoven();
+  const { findings, inspectorOpen, usage, set } = useCoven();
+  const agents = Object.entries(usage);
+  const sum = (k: "input" | "cache_write" | "cache_read" | "output" | "cost") => agents.reduce((n, [, u]) => n + u[k], 0);
+  const tokens = sum("input") + sum("cache_write") + sum("cache_read") + sum("output");
+  const kTok = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : `${n}`);
+  const usageTitle = agents
+    .map(([a, u]) => `${a}: ${u.calls} llamadas · ${kTok(u.input + u.cache_write)} entrada nueva · ${kTok(u.cache_read)} caché · ${kTok(u.output)} salida`)
+    .join("\n") + (sum("cost") ? `\n≈ $${sum("cost").toFixed(2)} a precio de API` : "");
   const open = findings.filter(isOpen);
   const counts: { label: string; n: number; severity: Severity | null }[] = [
     { label: "Critical", n: open.filter((f) => f.severity === "CRITICAL").length, severity: "CRITICAL" },
@@ -34,6 +41,11 @@ export default function TopBar() {
   return (
     <header className="flex h-10 shrink-0 items-center gap-4 border-b border-edge bg-panel px-3 text-[11px]">
       <div className="ml-auto flex shrink-0 items-center gap-1.5">
+        {tokens > 0 && (
+          <span title={usageTitle} className="mr-1 cursor-help tabular-nums text-muted">
+            {kTok(tokens)} tokens · {Math.round((sum("cache_read") / tokens) * 100)}% caché
+          </span>
+        )}
         {verified > 0 && <span className="mr-1 tabular-nums text-emerald-400">{verified} verificados</span>}
         {counts.map((c) => (
           <button

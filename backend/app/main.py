@@ -6,7 +6,8 @@ Client -> server:
   {"type": "user_message", "channel": "general", "content": "@Fixer ..."}
   {"type": "revert" | "accept", "path": "src/x.ts"}
 Server -> client:
-  channel_created | message | status | security_findings | tool_execution | test_output | diff | error | done
+  channel_created | message | status | security_findings | tool_execution | test_output | diff | usage | error | done
+    (usage: tokens of one LLM call — input, cache_write, cache_read, output, cost — tagged with the agent)
 """
 import time
 import uuid

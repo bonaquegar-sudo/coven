@@ -63,6 +63,8 @@ const load = <T,>(key: string, fallback: T): T => {
   }
 };
 
+export type Usage = { calls: number; input: number; cache_write: number; cache_read: number; output: number; cost: number };
+
 type State = {
   socket: WebSocket | null;
   running: boolean;
@@ -79,6 +81,7 @@ type State = {
   agents: Record<string, AgentStatus>;
   findings: Finding[];
   logs: LogEntry[];
+  usage: Record<string, Usage>; // per agent, summed from the backend's usage events
   diff: string;
   draft: string;
   query: string;
@@ -131,6 +134,14 @@ export const useCoven = create<State>((set, get) => {
         set({ logs: i < 0 ? [...s.logs, entry] : s.logs.map((l, j) => (j === i ? entry : l)) });
         break;
       }
+      case "usage": {
+        const u = s.usage[e.agent] ?? { calls: 0, input: 0, cache_write: 0, cache_read: 0, output: 0, cost: 0 };
+        set({ usage: { ...s.usage, [e.agent]: {
+          calls: u.calls + 1, input: u.input + (e.input ?? 0), cache_write: u.cache_write + (e.cache_write ?? 0),
+          cache_read: u.cache_read + (e.cache_read ?? 0), output: u.output + (e.output ?? 0), cost: u.cost + (e.cost ?? 0),
+        } } });
+        break;
+      }
       case "diff":
         set({ diff: e.diff });
         break;
@@ -144,7 +155,7 @@ export const useCoven = create<State>((set, get) => {
   }
 
   const fresh = () => ({
-    running: false, connected: false, channels: [], messages: [], findings: [], logs: [], diff: "",
+    running: false, connected: false, channels: [], messages: [], findings: [], logs: [], usage: {}, diff: "",
     unread: {}, newSince: null, active: "general", agents: idle(),
   });
 

@@ -56,7 +56,7 @@ with tempfile.TemporaryDirectory() as d:
     with client.websocket_connect("/ws/session") as ws:
         ev = run(ws, {"type": "start", "project_path": d, "llm": {"provider": "anthropic", "api_key": "k"}})
         authors = [e["author"] for e in ev if e["type"] == "message"]
-        assert authors == ["TechLead", "CodeScout", "Reviewer", "QARunner", "TechLead"], authors
+        assert authors == ["TechLead", "CodeScout", "Reviewer", "QARunner", "Fixer", "QARunner", "TechLead"], authors  # Fixer patched -> QA re-verifies
         assert sum(e["type"] == "channel_created" for e in ev) == 5
         tools = [(e["agent"], e["tool"], e["status"]) for e in ev if e["type"] == "tool_execution"]
         assert ("CodeScout", "scan_dependencies_osv", "done") in tools and ("Reviewer", "run_sast", "done") in tools, tools

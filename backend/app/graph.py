@@ -11,7 +11,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
-from .appsec_tools import SecurityFinding
+from .appsec_tools import SecurityFinding, _vkey
 from .llm import LLMConfig, chat
 from .prompts import DEFAULT_TASKS, PROMPTS, ROUTER
 from .tools import Workspace, tool_schemas
@@ -32,7 +32,9 @@ AGENTS = {
 PRE_RUN = {"CodeScout": ["scan_dependencies_osv", "scan_secrets", "map_api_routes"], "Reviewer": ["run_sast"]}
 APPSEC_TOOLS = {"scan_dependencies_osv", "scan_secrets", "run_sast", "map_api_routes", "verify_endpoint_security",
                 "report_finding", "set_finding_status"}
-SCAN = ["CodeScout", "Reviewer", "QARunner"]
+SCAN = ["CodeScout", "Reviewer", "QARunner", "Fixer"]
+SEV_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+CLOSED = {"FALSE_POSITIVE", "VERIFIED"}
 MAX_TURNS = 12  # agent turns per user request; TechLead wraps up when hit
 MAX_STEPS = 10  # tool-calling rounds per agent turn
 
@@ -66,22 +68,35 @@ def status(agent: str, state: str, detail: str = ""):
     emit({"type": "status", "agent": agent, "status": state, "detail": detail})
 
 
+async def ask(agent: str, cfg: LLMConfig, msgs: list[dict], schemas: list[dict] | None = None):
+    """chat() + one usage event per call, so the UI can show what each agent costs."""
+    reply = await chat(cfg, msgs, schemas)
+    if usage := getattr(reply, "usage", None):
+        emit({"type": "usage", "agent": agent, **usage})
+    return reply
+
+
 def context(state: CovenState) -> str:
     parts = [f"Proyecto: {state['project_path']}"]
     if state.get("target_url"):
         parts.append(f"Target URL (app en ejecución, sandbox): {state['target_url']}")
     if state.get("repo_map"):
         parts.append("## Mapa técnico (CodeScout)\n" + state["repo_map"])
-    if state.get("security_findings"):
-        parts.append("## Hallazgos de seguridad\n" + "\n".join(
-            f"{f['id']} [{f['severity']}][{f['status']}] {f['title']} — {f['file_path']}:{f['line_number']} ({f['standard']})"
-            + (f" endpoint {f['endpoint']}" if f.get("endpoint") else "") for f in state["security_findings"])[:6000])
+    if findings := state.get("security_findings"):
+        # open, non-LOW first by severity; LOW/closed only counted (the full registry is in the UI and list_findings)
+        open_ = sorted((f for f in findings if f["status"] not in CLOSED and f["severity"] != "LOW"),
+                       key=lambda f: SEV_ORDER.get(f["severity"], 9))
+        head = (f"{len(findings)} en total; {len(open_)} abiertos no-LOW"
+                + (f", se muestran {min(len(open_), 60)}" if len(open_) > 60 else ""))
+        parts.append(f"## Hallazgos de seguridad ({head})\n" + "\n".join(
+            f"{f['id']} [{f['severity']}][{f['status']}] {f['title'][:90]} — {f['file_path']}:{f['line_number']}"
+            + (f" endpoint {f['endpoint']}" if f.get("endpoint") else "") for f in open_[:60]))
     if state.get("diff") and state["diff"] != "(sin cambios)":
-        parts.append(f"## Diff actual (Fixer)\n```diff\n{state['diff'][:8000]}\n```")
-    recent = state.get("messages", [])[-6:]
+        parts.append(f"## Diff actual (Fixer)\n```diff\n{state['diff'][:6000]}\n```")
+    recent = state.get("messages", [])[-4:]
     if recent:
         parts.append("## Conversación reciente\n" + "\n\n".join(
-            f"[#{m['channel']}] {m['author']}: {m['content'][:1500]}" for m in recent))
+            f"[#{m['channel']}] {m['author']}: {m['content'][:1200]}" for m in recent))
     if state.get("request"):
         parts.append("## Petición del desarrollador\n" + state["request"])
     return "\n\n".join(parts)
@@ -112,7 +127,7 @@ async def run_agent(name: str, task: str, cfg: LLMConfig, ws: Workspace) -> str:
     try:
         for _ in range(MAX_STEPS):
             status(name, "thinking")
-            reply = await chat(cfg, msgs, schemas)
+            reply = await ask(name, cfg, msgs, schemas)
             if not reply.tool_calls:
                 return reply.content or ""
             msgs.append(reply.model_dump(exclude_none=True))
@@ -130,9 +145,35 @@ async def run_agent(name: str, task: str, cfg: LLMConfig, ws: Workspace) -> str:
                 msgs.append({"role": "tool", "tool_call_id": tc.id, "content": out})
         msgs.append({"role": "user", "content": "Límite de herramientas alcanzado. Publica ya tu mensaje final."})
         status(name, "thinking")
-        return (await chat(cfg, msgs, schemas)).content or ""
+        return (await ask(name, cfg, msgs, schemas)).content or ""
     finally:
         status(name, "idle")
+
+
+def inventory(ws: Workspace) -> str:
+    """CodeScout's tables, built from the scanners instead of written by the model: complete, exact, zero tokens."""
+    items = list(ws.findings.items.values())
+    deps: dict[str, list] = {}
+    for f in (f for f in items if f["source"] == "osv"):
+        deps.setdefault(f["title"].split(" vulnerable")[0], []).append(f)
+    rows = sorted(deps.items(), key=lambda kv: min(SEV_ORDER[f["severity"]] for f in kv[1]))
+    out = ["## Dependencias vulnerables", "| Paquete | Avisos | Máx. | Corrección | Ids |", "|---|---|---|---|---|"]
+    out += [f"| `{pkg}` | {len(fs)} | {min((f['severity'] for f in fs), key=SEV_ORDER.get)} | "
+            f"{max((f.get('fix', '') for f in fs), key=lambda x: _vkey(x.rpartition(' a ')[2]))} | {', '.join(f['id'] for f in fs)} |" for pkg, fs in rows] or ["| — | 0 | | | |"]
+    secrets = [f for f in items if f["source"] == "secrets"]
+    shown = sorted((f for f in secrets if f["severity"] != "LOW"), key=lambda f: SEV_ORDER[f["severity"]])
+    out += ["", "## Secretos expuestos", "| Id | Tipo | Ubicación | Sev. |", "|---|---|---|---|"]
+    out += [f"| {f['id']} | {f['title'].removeprefix('Secreto expuesto: ')} | `{f['file_path']}:{f['line_number']}` | "
+            f"{f['severity']} |" for f in shown[:40]] or ["| — | | | |"]
+    if len(secrets) > len(shown[:40]):
+        out.append(f"\n+{len(secrets) - len(shown[:40])} más (LOW: código de test o ignorados por git) en el inspector.")
+    open_routes = [r for r in ws.routes if not r["auth"]]
+    out += ["", f"## Rutas API sin autenticación ({len(open_routes)} de {len(ws.routes)})",
+            "| Método | Ruta | Archivo |", "|---|---|---|"]
+    out += [f"| {r['method']} | `{r['path']}` | `{r['file']}:{r['line']}` |" for r in open_routes[:40]] or ["| — | | |"]
+    if len(open_routes) > 40:
+        out.append(f"\n+{len(open_routes) - 40} rutas sin auth más (lista completa: map_api_routes).")
+    return "\n".join(out)
 
 
 def agent_node(name: str):
@@ -149,7 +190,8 @@ def agent_node(name: str):
         update: CovenState = {"turns": state.get("turns", 0) + 1, "pending": state.get("pending", [])[1:],
                               "security_findings": [dict(f) for f in ws.findings.items.values()]}
         if name == "CodeScout":
-            update["repo_map"] = text
+            update["repo_map"] = text  # the short LLM part; the tables below are already in the registry
+            text += "\n\n" + inventory(ws)
         update["messages"] = [post(AGENTS[name][0], name, text)]
         if name == "Fixer":
             update["diff"] = ws.get_git_diff()
@@ -163,7 +205,7 @@ def agent_node(name: str):
 async def lead_say(cfg: LLMConfig, instruction: str, state: CovenState) -> str:
     status("TechLead", "thinking")
     try:
-        reply = await chat(cfg, [{"role": "system", "content": PROMPTS["TechLead"] + "\n\n" + instruction},
+        reply = await ask("TechLead", cfg, [{"role": "system", "content": PROMPTS["TechLead"] + "\n\n" + instruction},
                                  {"role": "user", "content": context(state)}])
         return reply.content or ""
     finally:
@@ -177,8 +219,8 @@ async def techlead(state: CovenState, config: RunnableConfig):
         for c in CHANNELS:
             emit({"type": "channel_created", "channel": c})
         plan = ("\n\nVoy directo con tu petición." if state.get("request") else
-                "\n\n@CodeScout arranca el escaneo en #arquitectura; después @Reviewer audita en #auditoria "
-                "y @QARunner revisa los tests en #tests.")
+                "\n\n@CodeScout arranca el escaneo en #arquitectura; después @Reviewer audita en #auditoria, "
+                "@QARunner verifica en local en #tests y @Fixer corrige lo confirmado en #parches.")
         msg = post("general", "TechLead", f"Sesión iniciada sobre `{state['project_path']}`. Canales: "
                    + ", ".join(f"#{c}" for c in CHANNELS) + "." + plan)
         boot = {"started": True, "channels": CHANNELS, "turns": 0, "messages": [msg]}
