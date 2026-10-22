@@ -1,0 +1,144 @@
+@import "tailwindcss";
+
+/* Gintronic is a commercial font: install it on the system or drop the licensed
+   woff2 files into public/fonts/. Until then the monospace fallbacks are used. */
+@font-face {
+  font-family: "Gintronic";
+  src: local("Gintronic"), local("Gintronic-Regular"), url("/fonts/Gintronic-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Gintronic";
+  src: local("Gintronic Medium"), local("Gintronic-Medium"), url("/fonts/Gintronic-Medium.woff2") format("woff2");
+  font-weight: 500 600;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Gintronic";
+  src: local("Gintronic Bold"), local("Gintronic-Bold"), url("/fonts/Gintronic-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-display: swap;
+}
+
+@theme {
+  --font-sans: "Gintronic", "Cascadia Code", "JetBrains Mono", ui-monospace, Consolas, monospace;
+  --font-mono: "Gintronic", "Cascadia Code", "JetBrains Mono", ui-monospace, Consolas, monospace;
+
+  --color-carbon: #1c1c1b; /* main background */
+  --color-panel: #171716; /* sidebar / inspector */
+  --color-card: #242422; /* composer, bubbles, modals */
+  --color-edge: #31312d;
+  --color-ink: #e8e6e1;
+  --color-muted: #8f8e88;
+  --color-logo: #34d399; /* pixel wordmark tiles */
+  --color-logo-grid: #1f9e73;
+
+  --animate-fade-up: fade-up 260ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  --animate-fade: fade 180ms ease-out both;
+  --animate-pop: pop 180ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+
+  @keyframes fade-up {
+    from { opacity: 0; transform: translateY(6px); }
+  }
+  @keyframes fade {
+    from { opacity: 0; }
+  }
+  @keyframes pop {
+    from { opacity: 0; transform: scale(0.97) translateY(4px); }
+  }
+}
+
+html {
+  color-scheme: dark;
+  -webkit-font-smoothing: antialiased;
+}
+body {
+  @apply bg-carbon font-sans text-[13px] text-ink;
+}
+::selection {
+  @apply bg-emerald-500/30;
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-edge) transparent;
+}
+button {
+  @apply cursor-pointer transition-[background-color,color,opacity,transform] duration-150 active:scale-[0.97] disabled:cursor-not-allowed disabled:active:scale-100;
+}
+
+/* Skeleton shimmer */
+.skeleton {
+  border-radius: 4px;
+  background: linear-gradient(90deg, rgb(255 255 255 / 0.04) 25%, rgb(255 255 255 / 0.09) 37%, rgb(255 255 255 / 0.04) 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease infinite;
+}
+@keyframes shimmer {
+  from { background-position: 100% 50%; }
+  to { background-position: 0 50%; }
+}
+
+/* Logo gear turns while the team works */
+.logo-gear {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.logo-gear.is-spinning {
+  animation: spin 3.2s linear infinite;
+}
+@keyframes blink {
+  50% { opacity: 0; }
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Markdown inside chat messages */
+.prose-coven {
+  @apply text-[13px] leading-[1.7] break-words text-ink;
+}
+.prose-coven > * + * {
+  @apply mt-2.5;
+}
+.prose-coven h1,
+.prose-coven h2,
+.prose-coven h3 {
+  @apply mt-4 font-semibold text-ink;
+}
+.prose-coven ul {
+  @apply list-[square] pl-5 marker:text-emerald-500;
+}
+.prose-coven ol {
+  @apply list-decimal pl-5 marker:text-muted;
+}
+.prose-coven strong {
+  @apply font-semibold text-white;
+}
+.prose-coven :not(pre) > code {
+  @apply rounded bg-white/[0.07] px-1 py-0.5 text-[0.92em] break-all text-emerald-300;
+}
+.prose-coven pre {
+  @apply overflow-x-auto rounded-lg border border-edge bg-black/40 p-3 text-xs leading-relaxed;
+}
+.prose-coven pre code.hljs {
+  @apply bg-transparent p-0;
+}
+.prose-coven table {
+  @apply block overflow-x-auto text-xs;
+}
+.prose-coven th,
+.prose-coven td {
+  @apply border border-edge px-2 py-1;
+}
+.prose-coven blockquote {
+  @apply border-l-2 border-violet-500 pl-3 text-muted;
+}

@@ -1,0 +1,5 @@
+fastapi>=0.115
+uvicorn[standard]>=0.34
+langgraph>=0.4
+litellm>=1.70
+httpx>=0.28  # FastAPI TestClient (smoke test)
