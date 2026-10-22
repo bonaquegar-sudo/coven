@@ -58,8 +58,8 @@ def emit(event: dict):
     get_stream_writer()(event)
 
 
-def post(channel: str, author: str, content: str) -> dict:
-    msg = {"id": uuid.uuid4().hex, "channel": channel, "author": author, "content": content, "ts": time.time()}
+def post(channel: str, author: str, content: str, **extra) -> dict:
+    msg = {"id": uuid.uuid4().hex, "channel": channel, "author": author, "content": content, "ts": time.time(), **extra}
     emit({"type": "message", **msg})
     return msg
 
@@ -148,6 +148,21 @@ async def run_agent(name: str, task: str, cfg: LLMConfig, ws: Workspace) -> str:
         return (await ask(name, cfg, msgs, schemas)).content or ""
     finally:
         status(name, "idle")
+
+
+def report(state: CovenState) -> str:
+    """Final report appended to TechLead's summary: exact counts from the registry, not the model's recollection."""
+    findings = state.get("security_findings") or []
+    cols = ["DETECTED", "CONFIRMED_BY_QA", "PATCHED", "VERIFIED", "FALSE_POSITIVE"]
+    out = ["## Informe", "| Severidad | Detectado | Confirmado | Parcheado | Verificado | Falso + |", "|---|---|---|---|---|---|"]
+    for sev in SEV_ORDER:
+        row = [sum(f["severity"] == sev and f["status"] == c for f in findings) for c in cols]
+        if any(row):
+            out.append(f"| {sev} | " + " | ".join(str(n) for n in row) + " |")
+    files = re.findall(r"^\+\+\+ b/(.+)$", state.get("diff") or "", re.M)
+    out.append(f"\n{len(findings)} hallazgos en total. "
+               + (f"Archivos modificados por Fixer: {', '.join(f'`{f}`' for f in files)}." if files else "Sin cambios en el código."))
+    return "\n".join(out)
 
 
 def inventory(ws: Workspace) -> str:
@@ -244,7 +259,7 @@ async def techlead(state: CovenState, config: RunnableConfig):
     over = state.get("turns", 0) >= MAX_TURNS
     text = await lead_say(cfg, "Redacta el resumen final para #general (estado, riesgos principales, siguiente paso)."
                           + (" Se alcanzó el límite de turnos: indica que el equipo se detuvo." if over else ""), state)
-    return {"pending": [], "request": None, "messages": [post("general", "TechLead", text)]}
+    return {"pending": [], "request": None, "messages": [post("general", "TechLead", f"{text}\n\n{report(state)}", final=True)]}
 
 
 def next_agent(state: CovenState) -> str:

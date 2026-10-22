@@ -214,6 +214,21 @@ def shannon_entropy(s: str) -> float:
     return -sum(c / n * math.log2(c / n) for c in Counter(s).values()) if n else 0.0
 
 
+PEM_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S)
+
+
+def redact(text: str) -> str:
+    """File text → text safe for the LLM: private keys become a line marker, rule-matched secrets are masked.
+    Line count is preserved so line numbers stay valid."""
+    def key(m: re.Match) -> str:
+        line = text.count("\n", 0, m.start()) + 1
+        return f"[REDACTED_PRIVATE_KEY_DETECTED at line {line}]" + "\n" * m.group().count("\n")
+    text = PEM_KEY.sub(key, text)
+    for _, _, rx in SECRET_RULES:
+        text = rx.sub(lambda m: m.group().replace(m.group(1), mask(m.group(1))) if m.group(1) else m.group(), text)
+    return text
+
+
 def mask(value: str) -> str:
     """Never hand the raw secret to the LLM or the UI: keep 4 chars of prefix and the length."""
     if m := re.match(r"^(\w[\w+]*://[^:]+:)([^@]+)(@.*)$", value):  # DB URL: hide only the password
@@ -595,7 +610,7 @@ class FindingRegistry:
         touched = []
         if result["auth_gate"] in ("PASS", "FAIL"):
             for f in self.items.values():
-                # an anonymous probe only proves/disproves missing auth — not IDOR, injection, etc.
+                # an anonymous probe only proves/disproves missing auth — not IDOR, input validation, etc.
                 if (not f.get("endpoint") or not route_matches(f["endpoint"], method, endpoint)
                         or not MISSING_AUTH.search(f.get("standard") or "")):
                     continue

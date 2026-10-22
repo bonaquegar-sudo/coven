@@ -48,8 +48,8 @@ SPECS = {
     "run_sast": ("SAST: semgrep si está instalado, si no reglas nativas (eval, dangerouslySetInnerHTML, SQL con "
                  "f-string/template literal, CORS * con credenciales, endpoints sin auth).", {}, []),
     "map_api_routes": ("Mapa de rutas API (Express, FastAPI, Flask, Next.js) con indicador de auth.", {}, []),
-    "verify_endpoint_security": ("DAST local: cabeceras de seguridad y auth gate (sin credenciales y con token "
-                                 "inválido; debe responder 401/403). Solo localhost/127.0.0.1.",
+    "verify_endpoint_security": ("Prueba de integración local (auth_middleware_check + verify_schema de cabeceras): "
+                                 "petición sin credenciales y con token inválido; lo correcto es 401/403. Solo localhost/127.0.0.1.",
                                  {"base_url": "ej. http://localhost:3000", "endpoint": "ruta, ej. /api/users",
                                   "method": "GET, HEAD, OPTIONS o POST"}, ["base_url", "endpoint"]),
     "report_finding": ("Registra un hallazgo de seguridad confirmado leyendo el código.",
@@ -163,7 +163,7 @@ class Workspace:
     def read_file(self, path: str, start_line: str | int = 1, end_line: str | int = 0) -> str:
         start = max(int(start_line or 1), 1)
         end = min(int(end_line or start + 199), start + 399)
-        text = self._path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+        text = appsec.redact(self._path(path).read_text(encoding="utf-8", errors="replace")).splitlines()
         chunk = text[start - 1:end]
         more = f"\n... ({len(text)} líneas en total)" if end < len(text) else ""
         return "\n".join(f"{i}: {l}" for i, l in enumerate(chunk, start)) + more
@@ -178,7 +178,7 @@ class Workspace:
             if not fnmatch.fnmatch(p.name, glob) or p.stat().st_size > 1_000_000:
                 continue
             try:
-                for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+                for i, line in enumerate(appsec.redact(p.read_text(encoding="utf-8")).splitlines(), 1):
                     if rx.search(line):
                         hits.append(f"{self._rel(p)}:{i}: {line.strip()[:200]}")
             except UnicodeDecodeError:
@@ -210,7 +210,7 @@ class Workspace:
             after = p.read_text(encoding="utf-8") if p.exists() else ""
             out += difflib.unified_diff((before or "").splitlines(True), after.splitlines(True),
                                         f"a/{rel}" if before is not None else "/dev/null", f"b/{rel}")
-        return "".join(out) or "(sin cambios)"
+        return appsec.redact("".join(out)) or "(sin cambios)"
 
     def revert(self, rel: str) -> None:
         before = self.originals.pop(rel)

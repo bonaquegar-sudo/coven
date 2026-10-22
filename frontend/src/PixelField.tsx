@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 
 const GAP = 22; // px between grid cells
 const RADIUS = 170; // cursor influence radius
-const RGB = "52, 211, 153"; // emerald-400, same as the logo
+const RGB = "232, 230, 225"; // ink: neutral, no neon tint
 
 /** Background grid of pixel dots that twinkle and light up / push away around the cursor. */
 export default function PixelField() {

@@ -124,10 +124,10 @@ button {
   @apply font-semibold text-white;
 }
 .prose-coven :not(pre) > code {
-  @apply rounded bg-white/[0.07] px-1 py-0.5 text-[0.92em] break-all text-emerald-300;
+  @apply text-[0.92em] break-all text-sky-300/90;
 }
 .prose-coven pre {
-  @apply overflow-x-auto rounded-lg border border-edge bg-black/40 p-3 text-xs leading-relaxed;
+  @apply overflow-x-auto bg-black/25 px-3 py-2.5 text-xs leading-relaxed;
 }
 .prose-coven pre code.hljs {
   @apply bg-transparent p-0;
@@ -137,7 +137,10 @@ button {
 }
 .prose-coven th,
 .prose-coven td {
-  @apply border border-edge px-2 py-1;
+  @apply border-b border-white/[0.06] px-2 py-1 text-left;
+}
+.prose-coven th {
+  @apply font-semibold text-muted;
 }
 .prose-coven blockquote {
   @apply border-l-2 border-violet-500 pl-3 text-muted;

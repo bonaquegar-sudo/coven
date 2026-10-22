@@ -23,7 +23,8 @@ blocks = subs.render([{"role": "system", "content": "Eres X"}, {"role": "user", 
                      tool_schemas(["read_file"]))
 prompt = "\n\n".join(blocks)
 # one block per message, so earlier blocks stay byte-identical (prompt cache) when the chat grows
-assert len(blocks) == 5 and blocks[:4] == subs.render([{"role": "system", "content": "Eres X"}, {"role": "user", "content": "hola"}, dump,
+# the previous call's whole block list must be a prefix of the next one (else the cached prefix is never read)
+assert len(blocks) == 4 and blocks == subs.render([{"role": "system", "content": "Eres X"}, {"role": "user", "content": "hola"}, dump,
                       {"role": "tool", "tool_call_id": dump["tool_calls"][0]["id"], "content": "1: x = 1"},
                       {"role": "user", "content": "sigue"}], tool_schemas(["read_file"]))[:4]
 assert "- read_file:" in prompt and "<tool_call>" in prompt and "# Resultado de read_file\n1: x = 1" in prompt

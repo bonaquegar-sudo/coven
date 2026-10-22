@@ -215,4 +215,16 @@ dup = [{"ecosystem": "PyPI", "name": "requests", "cve": "CVE-2024-47081", "sever
        for s, f, x in [("MEDIUM", "2.32.4", "short"), ("HIGH", "2.32.3", "a longer summary")]]
 merged = appsec.dedupe_advisories(dup + [{**dup[0], "cve": "CVE-2024-35195"}])
 assert len(merged) == 2 and merged[0]["severity"] == "HIGH" and merged[0]["fixed"] == "2.32.4" and merged[0]["summary"] == "a longer summary"
+# private keys never reach the LLM: one marker at the key's first line, line count preserved
+pem = "-----BEGIN RSA PRIVATE KEY-----\nMIICXAIBAAKBgQDN\nabcd\n-----END RSA PRIVATE KEY-----"
+src = f"a = 1\nkey = '''{pem}'''\nb = 2\ninline = '{pem.replace(chr(10), chr(92) + 'r' + chr(92) + 'n')}'\naws = 'AKIAABCDEFGHIJKLMNOP'"
+red = appsec.redact(src)
+assert "MIICXAIBAAKBgQDN" not in red and "AKIAABCDEFGHIJKLMNOP" not in red, red
+assert red.count("\n") == src.count("\n") and "[REDACTED_PRIVATE_KEY_DETECTED at line 2]" in red
+assert "[REDACTED_PRIVATE_KEY_DETECTED at line 7]" in red, red
+with tempfile.TemporaryDirectory() as d:
+    (Path(d) / "k.py").write_text(src, encoding="utf-8")
+    ws = Workspace(d)
+    assert "MIICXAIBAAKBgQDN" not in ws.read_file("k.py") and "7: inline = '[REDACTED" in ws.read_file("k.py")
+    assert "MIICXAIBAAKBgQDN" not in ws.search_code("inline|MIIC")
 print("appsec OK")

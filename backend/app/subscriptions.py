@@ -68,8 +68,7 @@ def render(messages: list[dict], tools: list[dict] | None) -> list[str]:
             parts.append(f"# Resultado de {names.get(m.get('tool_call_id'), 'herramienta')}\n{content}")
         else:
             parts.append(f"# Usuario\n{content}")
-    parts.append("# Tu turno\nResponde ahora siguiendo las instrucciones.")
-    return parts
+    return parts  # no trailing block: the previous call's whole block list must stay a prefix of the next
 
 
 def parse(text: str) -> Message:
@@ -124,7 +123,7 @@ def complete(provider: str, model: str, blocks: list[str]) -> tuple[str, dict]:
                 _fail(provider, str(out.get("result") or out))
             cut = {"max_tokens": "\n\n[respuesta truncada por el límite de salida: divide el trabajo en pasos más cortos]",
                    "refusal": "\n\n[respuesta cortada por el filtro de seguridad del proveedor: reformula en términos "
-                              "defensivos (impacto y corrección), sin payloads ni pasos de explotación]"}
+                              "de calidad de código: impacto, evidencia, remediation_diff y regression_test]"}
             u = out.get("usage") or {}
             usage = {"input": u.get("input_tokens", 0), "cache_write": u.get("cache_creation_input_tokens", 0),
                      "cache_read": u.get("cache_read_input_tokens", 0), "output": u.get("output_tokens", 0),

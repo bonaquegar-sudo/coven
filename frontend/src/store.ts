@@ -3,11 +3,11 @@ import { create } from "zustand";
 import { Crown, Map, Shield, TestTube, Tools } from "pixelarticons/react";
 
 export const AGENTS = {
-  TechLead: { icon: Crown, channel: "general", role: "Orquestador", color: "bg-violet-500/15 text-violet-300" },
-  CodeScout: { icon: Map, channel: "arquitectura", role: "Recon", color: "bg-sky-500/15 text-sky-300" },
-  Reviewer: { icon: Shield, channel: "auditoria", role: "AppSec review", color: "bg-rose-500/15 text-rose-300" },
-  QARunner: { icon: TestTube, channel: "tests", role: "Verifier", color: "bg-emerald-500/15 text-emerald-300" },
-  Fixer: { icon: Tools, channel: "parches", role: "Patcher", color: "bg-amber-500/15 text-amber-300" },
+  TechLead: { icon: Crown, channel: "general", color: "bg-violet-500/15 text-violet-300" },
+  CodeScout: { icon: Map, channel: "arquitectura", color: "bg-sky-500/15 text-sky-300" },
+  Reviewer: { icon: Shield, channel: "auditoria", color: "bg-rose-500/15 text-rose-300" },
+  QARunner: { icon: TestTube, channel: "tests", color: "bg-emerald-500/15 text-emerald-300" },
+  Fixer: { icon: Tools, channel: "parches", color: "bg-amber-500/15 text-amber-300" },
 } as const;
 export type AgentName = keyof typeof AGENTS;
 export const PROVIDERS = ["openrouter", "anthropic", "openai", "gemini", "ollama"] as const;
@@ -23,7 +23,7 @@ export const providerLabel = (p: string) => {
 };
 export const needsKey =(provider: string) => provider !== "ollama" && !SUBSCRIPTIONS.some((s) => s.id === provider);
 
-export type Message = { id: string; channel: string; author: string; content: string; ts: number }; // ts in seconds
+export type Message = { id: string; channel: string; author: string; content: string; ts: number; final?: boolean }; // ts in seconds; final = team done
 export type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
 export type FindingStatus = "DETECTED" | "CONFIRMED_BY_QA" | "PATCHED" | "VERIFIED" | "FALSE_POSITIVE";
 export type Finding = {
