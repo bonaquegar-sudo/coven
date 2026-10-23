@@ -17,9 +17,20 @@ if sys.platform == "win32":
 
     def _no_window(self, *args, **kwargs):
         kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
+        kwargs.setdefault("stdin", subprocess.DEVNULL)  # never hand the app's stdin pipe to a CLI
         _popen_init(self, *args, **kwargs)
 
+    # On timeout subprocess.run kills only the direct child; with launcher wrappers (Git for Windows' cmd\git.exe,
+    # npx, shims) the real process survives holding the pipes and communicate() then waits forever.
+    _popen_kill = subprocess.Popen.kill
+
+    def _kill_tree(self):
+        if self.returncode is None:  # taskkill /T needs the parent alive to find its children
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.pid)], capture_output=True, timeout=10)
+        _popen_kill(self)
+
     subprocess.Popen.__init__ = _no_window
+    subprocess.Popen.kill = _kill_tree
 
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]

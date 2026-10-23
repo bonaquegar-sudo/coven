@@ -1,6 +1,8 @@
 """Plan/questions, Fixer approval, publish to a git remote, accepted risks, diff-only scans, confidence/compliance, CI CLI.
 Run: python test_features.py   (fake LLM, local bare git remote: no network except OSV)"""
 import subprocess
+import sys
+import time
 import tempfile
 from pathlib import Path
 
@@ -133,4 +135,14 @@ assert appsec.compliance({"standard": "CWE-798", "source": "secrets"})[1] == "IS
 assert appsec.compliance({"source": "osv", "standard": "CVE-2024-1"})[1] == "ISO 27001 A.8.8"
 assert appsec.compliance({"standard": "CWE-639"})[0].startswith("ASVS V4")
 assert appsec.fingerprint("sast:eval:src/a.ts:42") == "sast:eval:src/a.ts"
+# packaged backend: a timed-out command is killed with its whole tree (wrappers like Git for Windows' cmd\git.exe)
+if sys.platform == "win32":
+    import server  # noqa: F401  applies the win32 Popen patches
+    _t = time.time()
+    try:
+        subprocess.run([sys.executable, "-c", f"import subprocess; subprocess.run([r'{sys.executable}', '-c', 'import time; time.sleep(60)'])"],
+                       capture_output=True, timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+    assert time.time() - _t < 15, "timeout left the grandchild holding the pipes"
 print("features OK")
