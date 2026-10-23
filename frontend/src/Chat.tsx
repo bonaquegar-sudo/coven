@@ -275,10 +275,9 @@ function Composer({ hero }: { hero?: boolean }) {
           onClick={() => s.command({ type: "cancel" })}
           aria-label="Cancelar"
           title="Cancelar la ejecución"
-          className="flex h-7 shrink-0 items-center gap-1 rounded-md border border-red-400/30 px-2 text-[12px] text-red-300 hover:bg-red-500/10"
+          className="grid size-7 shrink-0 place-items-center rounded-md bg-red-600 text-white hover:bg-red-500"
         >
-          <Px icon={Close} size={12} />
-          Cancelar
+          <span className="size-2.5 bg-white" />
         </button>
       )}
       <button
