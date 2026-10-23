@@ -7,3 +7,5 @@ gen/
 .env
 *.log
 *.tsbuildinfo
+build/
+build-pyi.log

@@ -134,11 +134,28 @@ async def run_agent(name: str, task: str, cfg: LLMConfig, ws: Workspace) -> str:
     tools = AGENTS[name][1]
     schemas = tool_schemas(tools)
     msgs = [{"role": "system", "content": PROMPTS[name]}, {"role": "user", "content": task}]
+    used: set[str] = set()
+    MARK = ("Has modificado archivos pero no has marcado ningún hallazgo. Llama a set_finding_status con PATCHED "
+            "para cada COVEN-NNN que hayas corregido y luego publica tu mensaje final.")
+
+    def unmarked() -> bool:  # a patch without its status update leaves the lifecycle stuck in DETECTED
+        return bool(used & {"apply_patch", "write_file"}) and "set_finding_status" in tools and "set_finding_status" not in used
+
     try:
-        for _ in range(MAX_STEPS):
+        reminded, limit = False, MAX_STEPS
+        for step in range(MAX_STEPS + 3):
+            if step == limit:  # out of steps: only the status update is still allowed, then the final message
+                if not unmarked():
+                    break
+                reminded = True
+                msgs.append({"role": "user", "content": "Límite de herramientas alcanzado. " + MARK})
             status(name, "thinking")
             reply = await ask(name, cfg, msgs, schemas)
             if not reply.tool_calls:
+                if unmarked() and not reminded:
+                    reminded = True
+                    msgs += [reply.model_dump(exclude_none=True), {"role": "user", "content": MARK}]
+                    continue
                 return reply.content or ""
             msgs.append(reply.model_dump(exclude_none=True))
             for tc in reply.tool_calls:
@@ -147,11 +164,12 @@ async def run_agent(name: str, task: str, cfg: LLMConfig, ws: Workspace) -> str:
                     args = json.loads(tc.function.arguments or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                if tool in tools:
+                if tool in tools and (step < limit or tool == "set_finding_status"):
+                    used.add(tool)
                     status(name, "tool", f"{tool}({json.dumps(args, ensure_ascii=False)[:80]})")
                     out = await use_tool(name, tool, args, ws)
                 else:
-                    out = f"ERROR: {tool} no está disponible para {name}"
+                    out = f"ERROR: {tool} no está disponible para {name}" if tool not in tools else "ERROR: límite alcanzado"
                 msgs.append({"role": "tool", "tool_call_id": tc.id, "content": out})
         msgs.append({"role": "user", "content": "Límite de herramientas alcanzado. Publica ya tu mensaje final."})
         status(name, "thinking")
@@ -242,6 +260,15 @@ async def lead_say(cfg: LLMConfig, instruction: str, state: CovenState) -> str:
 
 PUBLISH_ASK = re.compile(r"pull request|\bPR\b|github|git push|\b(sube|subir|súbelo|subelo|publica|publicar)\b[^.\n]{0,40}"
                          r"\b(git|repo|repositorio|rama|remoto|cambios)\b", re.I)
+NO_PUBLISH = re.compile(r"\b(no|nunca|sin)\b[^.\n]{0,30}(\bsub|\bpubli|push|\bPR\b|github|pull request)", re.I)
+
+
+def wants_publish(*texts: str | None) -> bool:
+    """Asked to push/open a PR, and never told not to ("no lo subas a GitHub" must not publish)."""
+    texts = [t for t in texts if t]
+    return any(PUBLISH_ASK.search(t) for t in texts) and not any(NO_PUBLISH.search(t) for t in texts)
+
+
 YES = re.compile(r"^\s*(s[ií]|ok|vale|adelante|aprob|apruebo|dale|correcto|perfecto)\b", re.I)
 SKIP = re.compile(r"^\s*(no\b|salta|saltar|cancel|omit)", re.I)
 COVEN_ID = re.compile(r"COVEN-\d+", re.I)
@@ -270,7 +297,9 @@ async def planning(state: CovenState, cfg: LLMConfig, final: bool = False) -> Co
         msg = post("general", "TechLead", "Antes de empezar necesito aclarar esto:\n\n" + body, kind="questions")
         return {"awaiting": "answers", "pending": [], "routed": True, "goal": state["goal"], "messages": [msg]}
     names = list(dict.fromkeys(n for n in re.findall(r"\w+", route.group(1)) if n in AGENTS)) if route else []
-    publish = bool(PUBLISH_ASK.search(state["goal"]) or re.search(r"^\W*PUBLICAR:\W*s[ií]", text, re.M | re.I))
+    # the goal already carries the developer's answers; an explicit "no lo subas" there beats the planner's PUBLICAR
+    publish = (wants_publish(state["goal"]) or bool(re.search(r"^\W*PUBLICAR:\W*s[ií]", text, re.M | re.I))) \
+        and not NO_PUBLISH.search(state["goal"])
     body = re.sub(r"^\W*(ROUTE|PUBLICAR):.*$", "", text, flags=re.M).strip()
     msg = post("general", "TechLead", body + ("\n\nAl terminar subiré los cambios a una rama nueva y abriré la PR." if publish else ""),
                kind="plan")
@@ -299,7 +328,7 @@ async def techlead(state: CovenState, config: RunnableConfig):
             return {**boot, **upd, "messages": [msg, *upd["messages"]]}
         if not state.get("request"):
             return {**boot, "pending": SCAN, "publish": False}
-        boot["publish"] = bool(PUBLISH_ASK.search(state["request"]))
+        boot["publish"] = wants_publish(state["request"])
 
     # the run ended waiting for the developer; this message is their answer
     if state.get("awaiting") == "answers" and state.get("request"):
@@ -339,19 +368,20 @@ async def techlead(state: CovenState, config: RunnableConfig):
             reply = rest.strip() or text
         explicit = "Fixer" in re.findall(r"@(\w+)", state["request"])  # the developer called Fixer: that is the approval
         return {**boot, "routed": True, "pending": names, "turns": 0, "approved": explicit,
-                "publish": bool(PUBLISH_ASK.search(state["request"])),
+                "publish": wants_publish(state["request"]),
                 "messages": [*boot.get("messages", []), post("general", "TechLead", reply)]}
 
     over = state.get("turns", 0) >= MAX_TURNS
     text = await lead_say(cfg, "Redacta el resumen final para #general (estado, riesgos principales, siguiente paso)."
                           + (" Se alcanzó el límite de turnos: indica que el equipo se detuvo." if over else ""), state)
+    text = re.sub(r"(\n\s*@\w+\s*)+$", "", text.rstrip())  # the model sometimes signs off with a bare "@Agent" line
     summary = f"{text}\n\n{report(state)}"
     if state.get("publish"):
         try:
             title = f"Coven: correcciones de seguridad ({sum(f['status'] == 'PATCHED' for f in state.get('security_findings') or [])} hallazgos)"
             result = await asyncio.to_thread(ws.git_publish, title, summary)
         except Exception as e:
-            result = f"no se pudo publicar: {e}"
+            result = f"no se pudo publicar: {e}. Los cambios siguen en tu rama, sin commit."
         emit({"type": "diff", "diff": ws.get_git_diff(), "files": list(ws.originals)})
         summary += f"\n\n**GitHub:** {result}"
     return {"pending": [], "request": None, "approved": False, "publish": False,

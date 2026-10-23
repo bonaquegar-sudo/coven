@@ -297,7 +297,7 @@ export default function Chat() {
 
   useEffect(() => {
     end.current?.scrollIntoView({ behavior: "smooth" }); // newer browsers return a Promise here; must not leak to React
-  }, [timeline.length, active, here.length]);
+  }, [timeline.length, active, here.length, running]); // running: the approval buttons appear when a run ends
 
   const showSidebar = !sidebarOpen && (
     <button onClick={() => set({ sidebarOpen: true })} aria-label="Mostrar barra lateral" className="p-1 text-muted hover:text-ink">

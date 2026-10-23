@@ -112,10 +112,20 @@ type State = {
 const idle = () => Object.fromEntries(Object.keys(AGENTS).map((a) => [a, { status: "idle", detail: "" }])) as State["agents"];
 const sysMsg = (content: string): Message => ({ id: crypto.randomUUID(), channel: "general", author: "system", content, ts: Date.now() / 1000 });
 
+// The backend keeps a run going if the socket drops; we reattach with the session id and replay from `next`.
+const session = { id: "", next: 0, tries: 0 };
+
 export const useCoven = create<State>((set, get) => {
   function onEvent(e: any) {
+    if (e.seq !== undefined) {
+      if (e.seq < session.next) return; // already seen (replay overlap)
+      session.next = e.seq + 1;
+    }
     const s = get();
     switch (e.type) {
+      case "session":
+        session.id = e.id;
+        break;
       case "channel_created":
         if (!s.channels.includes(e.channel)) set({ channels: [...s.channels, e.channel] });
         break;
@@ -164,6 +174,34 @@ export const useCoven = create<State>((set, get) => {
     }
   }
 
+  function attach(ws: WebSocket, hello: object) {
+    ws.onopen = () => {
+      if (session.tries) set((s) => ({ messages: [...s.messages, sysMsg("Reconectado: el equipo siguió trabajando mientras tanto.")] }));
+      session.tries = 0;
+      set({ connected: true });
+      ws.send(JSON.stringify(hello));
+    };
+    ws.onmessage = (m) => onEvent(JSON.parse(m.data));
+    ws.onclose = () => {
+      if (get().socket !== ws) return; // replaced by a newer session
+      if (session.id && session.tries < 8) {
+        const n = session.tries++;
+        if (n === 0) set((s) => ({ connected: false, messages: [...s.messages, sysMsg("Conexión perdida; reconectando…")] }));
+        setTimeout(() => {
+          if (get().socket !== ws) return;
+          const next = new WebSocket(WS_URL);
+          set({ socket: next });
+          attach(next, { type: "resume", id: session.id, since: session.next });
+        }, Math.min(500 * 2 ** n, 8000));
+        return;
+      }
+      set((s) => ({ socket: null, running: false, connected: false, agents: idle(), messages: [...s.messages, sysMsg("Conexión con el backend cerrada.")] }));
+    };
+    ws.onerror = () => {
+      if (!session.id) set((s) => ({ messages: [...s.messages, sysMsg(`No se pudo conectar a ${WS_URL}. ¿Está el backend arrancado?`)] }));
+    };
+  }
+
   const fresh = () => ({
     running: false, connected: false, channels: [], messages: [], findings: [], logs: [], usage: {}, diff: "",
     unread: {}, newSince: null, active: "general", agents: idle(),
@@ -208,26 +246,19 @@ export const useCoven = create<State>((set, get) => {
       }),
     start: (request) => {
       const { projectPath, llm, socket, prefs } = get();
+      Object.assign(session, { id: "", next: 0, tries: 0 });
       socket?.close();
       const ws = new WebSocket(WS_URL);
       set({ ...fresh(), socket: ws, running: true, draft: "" });
-      ws.onopen = () => {
-        set({ connected: true });
-        // With a request the backend skips the initial scan and routes it directly.
-        ws.send(JSON.stringify({
-          type: "start", project_path: projectPath, llm, request: request?.trim() || undefined,
-          plan: prefs.plan, approve_fixes: prefs.approveFixes, only_changes: prefs.onlyChanges,
-        }));
-      };
-      ws.onmessage = (m) => onEvent(JSON.parse(m.data));
-      ws.onclose = () => {
-        if (get().socket !== ws) return; // replaced by a newer session
-        set((s) => ({ socket: null, running: false, connected: false, agents: idle(), messages: [...s.messages, sysMsg("Conexión con el backend cerrada.")] }));
-      };
-      ws.onerror = () => set((s) => ({ messages: [...s.messages, sysMsg(`No se pudo conectar a ${WS_URL}. ¿Está el backend arrancado?`)] }));
+      // With a request the backend skips the initial scan and routes it directly.
+      attach(ws, {
+        type: "start", project_path: projectPath, llm, request: request?.trim() || undefined,
+        plan: prefs.plan, approve_fixes: prefs.approveFixes, only_changes: prefs.onlyChanges,
+      });
     },
     reset: () => {
       const { socket } = get();
+      session.id = "";
       set({ ...fresh(), socket: null, draft: "" }); // clear first so onclose ignores this socket
       socket?.close();
     },

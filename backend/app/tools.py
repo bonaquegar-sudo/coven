@@ -28,7 +28,12 @@ BLOCKED_EXES = {"rm", "rmdir", "del", "erase", "rd", "format", "mkfs", "dd", "sh
                 "chmod", "chown", "kill", "taskkill", "curl", "wget", "ssh", "scp", "nc", "ncat", "netsh", "schtasks"}
 BLOCKED_SUBCOMMANDS = ("git push", "git reset", "git clean", "git checkout", "git restore", "git rebase", "git remote",
                        "git config", "npm publish", "npm adduser", "npm login", "npm token", "pip uninstall",
-                       "npm uninstall", "yarn publish", "pnpm publish", "python -c", "node -e", "node --eval")
+                       "npm uninstall", "yarn publish", "pnpm publish", "python -c", "node -e", "node --eval",
+                       # installs change node_modules/site-packages behind the Diff panel and reach the registry
+                       "npm install", "npm i", "npm ci", "npm update", "npm up", "npm add", "npm audit fix", "npm link",
+                       "yarn add", "yarn install", "yarn upgrade", "pnpm add", "pnpm install", "pnpm i", "pnpm update",
+                       "bun add", "bun install", "pip install", "pip download", "python -m pip install", "uv add",
+                       "uv pip", "poetry add", "cargo add", "cargo install", "go get", "go install")
 
 # name -> (description, {param: description}, required params)
 SPECS = {
@@ -49,8 +54,8 @@ SPECS = {
     "run_tests": ("Ejecuta un test runner/linter permitido: " + ", ".join(" ".join(c) for c in TEST_COMMANDS),
                   {"command": "Comando, ej. 'npx vitest run' o 'pytest -q'"}, ["command"]),
     "run_command": ("Ejecuta cualquier comando de desarrollo en la raíz del proyecto (sin shell: nada de pipes ni &&), p. ej. "
-                    "'npm install', 'node scripts/check.js', 'python -m pip list', 'git log -5'. Sin borrados, sin git push/reset, "
-                    "rutas solo dentro del proyecto, red solo a localhost. Devuelve exit code y salida.",
+                    "'npx tsc --noEmit', 'node scripts/check.js', 'python -m pip list', 'git log -5'. Sin borrados, sin git push/reset, "
+                    "sin instalar paquetes (cambia la versión en el manifiesto y avisa), rutas solo dentro del proyecto, red solo a localhost. Devuelve exit code y salida.",
                     {"command": "Comando completo", "timeout": "Segundos, máx. 300 (120 por defecto)"}, ["command"]),
     "run_code": ("Ejecuta un script corto de diagnóstico (regression_test, diagnostic_input) en Python o Node con cwd en la "
                  "raíz del proyecto, p. ej. para importar un módulo y comprobar una función parcheada. Red solo a localhost.",
@@ -167,6 +172,7 @@ class Workspace:
         if not files:
             raise ValueError("no hay cambios de Coven que publicar")
         self._git("rev-parse", "--git-dir")
+        start, tracked = self._git("rev-parse", "--abbrev-ref", "HEAD"), dict(self.originals)
         slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "fix"
         branch = f"coven/{slug}-{time.strftime('%Y%m%d-%H%M%S')}"
         # the developer stays on the new branch: the working tree keeps exactly what they reviewed in the Diff panel
@@ -178,7 +184,16 @@ class Workspace:
         remote = self._git("remote", check=False).splitlines()
         if not remote:
             return f"Rama {branch} creada con el commit (sin remoto configurado: no se ha subido)."
-        self._git("push", "-u", remote[0], branch)
+        try:
+            self._git("push", "-u", remote[0], branch)
+        except Exception:
+            # push refused (no permission, offline...): back to where the developer was, changes uncommitted as before
+            self._git("reset", "--soft", "HEAD~1")
+            self._git("switch", start)
+            self._git("branch", "-D", branch)
+            self._git("reset", "-q", "--", *files)
+            self.originals.update(tracked)
+            raise
         gh = shutil.which("gh")
         if gh:
             r = subprocess.run([gh, "pr", "create", "--head", branch, "--title", title, "--body", body], cwd=self.root,
@@ -299,7 +314,8 @@ class Workspace:
         if not argv:
             raise ValueError("comando vacío")
         exe = Path(argv[0]).stem.lower()
-        if exe in BLOCKED_EXES or any(" ".join([exe, *argv[1:3]]).lower().startswith(b) for b in BLOCKED_SUBCOMMANDS):
+        head = " ".join([exe, *argv[1:4]]).lower() + " "
+        if exe in BLOCKED_EXES or any(head.startswith(b + " ") for b in BLOCKED_SUBCOMMANDS):
             raise ValueError(f"'{' '.join(argv[:2])}' no está permitido (destructivo, shell o publicación)")
         for a in argv[1:]:
             self._check_arg(a.strip("'\""))

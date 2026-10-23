@@ -107,6 +107,24 @@ with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as remote
     (repo / "new.py").unlink()
     assert cli([d, "--diff-base", "HEAD"]) == 0
 
+    # push refused: back on the original branch, change uncommitted and still reviewable, no leftover branch
+    git(d, "switch", "-q", "main")
+    git(d, "remote", "set-url", "origin", str(repo / "no-such-remote"))
+    w3 = Workspace(d)
+    w3.apply_patch("app.py", "x = 1", "x = 3")
+    try:
+        w3.git_publish("t", "b")
+        raise AssertionError("publish should fail")
+    except ValueError as e:
+        assert "push" in str(e)
+    assert git(d, "rev-parse", "--abbrev-ref", "HEAD") == "main" and not git(d, "branch", "--list", "coven/t-*")
+    assert "app.py" in git(d, "status", "--porcelain") and "app.py" in w3.originals
+
+# "no lo subas" never publishes, even when the request mentions GitHub
+assert not graph.wants_publish("Audita y corrige. No lo subas a GitHub, deja los cambios en local.")
+assert not graph.wants_publish("sin subir nada, solo audita")
+assert graph.wants_publish("arregla y súbelo a GitHub") and graph.wants_publish("corrige y abre una PR")
+
 # confidence and compliance mapping
 assert appsec.confidence({"source": "osv"}) == "alta" and appsec.confidence({"source": "sast"}) == "baja"
 assert appsec.confidence({"source": "sast", "status": "CONFIRMED_BY_QA"}) == "alta"

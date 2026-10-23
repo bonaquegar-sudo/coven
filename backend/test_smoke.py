@@ -24,8 +24,13 @@ def call(name, **args):
     return Reply(content=None, tool_calls=[SimpleNamespace(id="t1", function=SimpleNamespace(name=name, arguments=json.dumps(args)))])
 
 
+NUDGED = []  # Fixer patched without set_finding_status -> the graph reminds it once
+
+
 async def fake_chat(cfg, messages, tools=None):
     system, last = messages[0]["content"], messages[-1]
+    if "no has marcado" in str(last.get("content")):
+        NUDGED.append(1)
     if "Decide qué agentes" in system:
         return Reply(content="ROUTE: none\nHola", tool_calls=None)
     if last["role"] != "tool":
@@ -52,12 +57,13 @@ def run(ws, payload):
 graph.chat = fake_chat
 with tempfile.TemporaryDirectory() as d:
     Path(d, "app.py").write_text("x = 1\n")
-    client = TestClient(app)
+    client = TestClient(app).__enter__()  # one event loop for every socket, as under uvicorn (sessions outlive sockets)
     with client.websocket_connect("/ws/session") as ws:
         ev = run(ws, {"type": "start", "project_path": d, "llm": {"provider": "anthropic", "api_key": "k"}})
         authors = [e["author"] for e in ev if e["type"] == "message"]
         assert authors == ["TechLead", "CodeScout", "Reviewer", "QARunner", "Fixer", "QARunner", "TechLead"], authors  # Fixer patched -> QA re-verifies
         assert sum(e["type"] == "channel_created" for e in ev) == 5
+        assert len(NUDGED) == 1, NUDGED
         tools = [(e["agent"], e["tool"], e["status"]) for e in ev if e["type"] == "tool_execution"]
         assert ("CodeScout", "scan_dependencies_osv", "done") in tools and ("Reviewer", "run_sast", "done") in tools, tools
         assert next(e for e in ev if e["type"] == "security_findings")["findings"] == []  # app.py has nothing to report
@@ -89,6 +95,20 @@ with tempfile.TemporaryDirectory() as d:
 
     Path(d, "package.json").write_text('{"dependencies": {"next": "1", "react": "1"}, "devDependencies": {"typescript": "5"}}')
     assert client.get("/project", params={"path": d}).json()["stack"] == ["Next.js", "TypeScript", "Python"]
+    # dropped connection: the team keeps working and a new socket resumes without gaps or duplicates
+    with client.websocket_connect("/ws/session") as ws:
+        ws.send_json({"type": "start", "project_path": d, "llm": {"provider": "anthropic", "api_key": "k"}})
+        sid = ws.receive_json()["id"]
+        first = [ws.receive_json() for _ in range(3)]
+    with client.websocket_connect("/ws/session") as ws:
+        ws.send_json({"type": "resume", "id": sid, "since": first[-1]["seq"] + 1})
+        rest = []
+        while (e := ws.receive_json())["type"] != "done":
+            rest.append(e)
+    seqs = [e["seq"] for e in first + rest]
+    assert seqs == list(range(len(seqs))), seqs
+    assert [e["author"] for e in first + rest if e["type"] == "message"][-1] == "TechLead"
+
     assert client.get("/project", params={"path": d + "/nope"}).status_code == 404
     assert client.get("/health").json()["sandbox"] in ("ready", "stopped", "missing")
 

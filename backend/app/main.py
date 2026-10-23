@@ -9,8 +9,9 @@ Client -> server:
   {"type": "revert" | "accept", "path": "src/x.ts"}
   {"type": "accept_risk", "id": "COVEN-012", "reason": "..."} | {"type": "reopen", "id": "COVEN-012"}
   {"type": "publish", "title"?: "...", "body"?: "..."}   (new branch + commit + push + PR with Coven's changes)
-Server -> client:
-  channel_created | message | status | security_findings | tool_execution | test_output | diff | usage | error | done
+  {"type": "resume", "id": "<session id>", "since": <next seq>}   (reattach after a dropped connection)
+Server -> client (every event but "session" carries "seq"):
+  session | channel_created | message | status | security_findings | tool_execution | test_output | diff | usage | error | done
     (usage: tokens of one LLM call — input, cache_write, cache_read, output, cost — tagged with the agent)
 """
 import asyncio
@@ -58,17 +59,36 @@ def providers():
             for name, (_, model) in PROVIDERS.items()}
 
 
-@app.websocket("/ws/session")
-async def session(ws: WebSocket):
-    origin = ws.headers.get("origin")
-    if origin and origin not in ALLOWED_ORIGINS:
-        await ws.close(code=1008)
-        return
-    await ws.accept()
-    run_config = None
-    try:
+class Session:
+    """A run outlives its socket: events are numbered and kept, so a client that drops reconnects with
+    {"type": "resume"} and gets what it missed while the agents kept working."""
+
+    def __init__(self):
+        self.id = uuid.uuid4().hex
+        self.events: list[dict] = []
+        self.ws: WebSocket | None = None
+        self.inbox: asyncio.Queue = asyncio.Queue()
+        self.worker = asyncio.create_task(self.work())
+
+    async def emit(self, event: dict):
+        event = {**event, "seq": len(self.events)}
+        self.events.append(event)
+        if self.ws:
+            try:
+                await self.ws.send_json(event)
+            except Exception:  # socket gone: keep working, the client resumes from its last seq
+                self.ws = None
+
+    async def attach(self, ws: WebSocket, since: int = 0):
+        while since < len(self.events):  # events emitted during the replay are picked up by the loop
+            await ws.send_json(self.events[since])
+            since += 1
+        self.ws = ws  # no await since the last check: nothing can slip between replay and live
+
+    async def work(self):
+        run_config = None
         while True:
-            data = await ws.receive_json()
+            data = await self.inbox.get()
             kind = data.get("type")
             try:
                 if kind == "start":
@@ -84,13 +104,13 @@ async def session(ws: WebSocket):
                               "plan": bool(data.get("plan")), "approve_fixes": bool(data.get("approve_fixes"))}
                     if data.get("request"):
                         msg = user_message(data["request"])
-                        await ws.send_json({"type": "message", **msg})
+                        await self.emit({"type": "message", **msg})
                         inputs |= {"messages": [msg], "request": data["request"], "routed": False, "turns": 0}
                 elif run_config is None:
                     raise ValueError("Envía primero {'type': 'start'}")
                 elif kind == "user_message":
                     msg = user_message(data["content"], data.get("channel", "general"))
-                    await ws.send_json({"type": "message", **msg})
+                    await self.emit({"type": "message", **msg})
                     inputs = {"messages": [msg], "request": data["content"], "routed": False, "turns": 0}
                 elif kind in ("revert", "accept"):
                     workspace = run_config["configurable"]["workspace"]
@@ -98,29 +118,61 @@ async def session(ws: WebSocket):
                         workspace.revert(data["path"])
                     else:  # keep the change on disk, stop tracking it
                         workspace.originals.pop(data["path"], None)
-                    await ws.send_json({"type": "diff", "diff": workspace.get_git_diff(), "files": list(workspace.originals)})
+                    await self.emit({"type": "diff", "diff": workspace.get_git_diff(), "files": list(workspace.originals)})
                     continue
                 elif kind in ("accept_risk", "reopen"):
                     findings = run_config["configurable"]["workspace"].findings
                     findings.accept_risk(data["id"], data.get("reason", "")) if kind == "accept_risk" else findings.reopen(data["id"])
-                    await ws.send_json({"type": "security_findings", "findings": list(findings.items.values())})
+                    await self.emit({"type": "security_findings", "findings": list(findings.items.values())})
                     continue
                 elif kind == "publish":
                     workspace = run_config["configurable"]["workspace"]
                     result = await asyncio.to_thread(workspace.git_publish, data.get("title") or "Coven: correcciones de seguridad",
                                                      data.get("body") or "Cambios revisados en el panel Diff de Coven.")
-                    await ws.send_json({"type": "message", **user_message(f"**GitHub:** {result}") | {"author": "system"}})
-                    await ws.send_json({"type": "diff", "diff": workspace.get_git_diff(), "files": list(workspace.originals)})
+                    await self.emit({"type": "message", **user_message(f"**GitHub:** {result}") | {"author": "system"}})
+                    await self.emit({"type": "diff", "diff": workspace.get_git_diff(), "files": list(workspace.originals)})
                     continue
                 else:
                     raise ValueError(f"Tipo de mensaje desconocido: {kind}")
                 # ponytail: messages sent while the team is working queue up until this run ends.
                 async for event in graph.astream(inputs, run_config, stream_mode="custom"):
-                    await ws.send_json(event)
-            except WebSocketDisconnect:
-                raise
+                    await self.emit(event)
             except Exception as e:
-                await ws.send_json({"type": "error", "message": f"{type(e).__name__}: {e}"})
-            await ws.send_json({"type": "done"})
+                await self.emit({"type": "error", "message": f"{type(e).__name__}: {e}"})
+            await self.emit({"type": "done"})
+
+
+SESSIONS: dict[str, Session] = {}  # ponytail: kept until the server exits; a cap if sessions pile up
+
+
+@app.websocket("/ws/session")
+async def session(ws: WebSocket):
+    origin = ws.headers.get("origin")
+    if origin and origin not in ALLOWED_ORIGINS:
+        await ws.close(code=1008)
+        return
+    await ws.accept()
+    current: Session | None = None
+    try:
+        while True:
+            data = await ws.receive_json()
+            if data.get("type") == "resume":
+                current = SESSIONS.get(data.get("id", ""))
+                if current is None:
+                    await ws.send_json({"type": "error", "message": "La sesión ya no existe en el backend (¿se reinició?)."})
+                    await ws.send_json({"type": "done"})
+                    continue
+                await current.attach(ws, int(data.get("since", 0)))
+                continue
+            if data.get("type") == "start":
+                current = Session()
+                SESSIONS[current.id] = current
+                current.ws = ws
+                await ws.send_json({"type": "session", "id": current.id})
+            elif current is None:
+                await ws.send_json({"type": "error", "message": "Envía primero {'type': 'start'}"})
+                continue
+            current.inbox.put_nowait(data)
     except WebSocketDisconnect:
-        pass
+        if current and current.ws is ws:
+            current.ws = None

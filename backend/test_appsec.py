@@ -239,7 +239,8 @@ with tempfile.TemporaryDirectory() as d:
     assert "exit code 1" in run("run_code", language="python", code="raise SystemExit(1)")
     assert not list((Path(d) / ".coven").glob("*")), "scripts are cleaned up"
     for bad in ["rm -rf .", "del mod.py", "powershell -c dir", "git push origin main", "curl http://example.com",
-                "python -c print(1)", "python ../outside.py", "python C:/Windows/win.ini", "node x.js http://evil.example"]:
+                "python -c print(1)", "python ../outside.py", "python C:/Windows/win.ini", "node x.js http://evil.example",
+                "npm install", "npm i jsonwebtoken@9", "pip install requests", "python -m pip install x", "yarn add x"]:
         assert run("run_command", command=bad).startswith("ERROR"), bad
     assert run("run_code", language="python", code="import urllib.request\nurllib.request.urlopen('https://evil.example')").startswith("ERROR")
     assert run("run_code", language="ruby", code="puts 1").startswith("ERROR")
