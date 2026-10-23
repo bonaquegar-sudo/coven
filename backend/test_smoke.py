@@ -3,6 +3,7 @@ Run: python test_smoke.py"""
 import asyncio
 import json
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -108,6 +109,25 @@ with tempfile.TemporaryDirectory() as d:
     seqs = [e["seq"] for e in first + rest]
     assert seqs == list(range(len(seqs))), seqs
     assert [e["author"] for e in first + rest if e["type"] == "message"][-1] == "TechLead"
+
+    # cancel: stops a run stuck on a slow model right away and the session keeps accepting messages
+    async def slow_chat(cfg, messages, tools=None):
+        await asyncio.sleep(60)
+    graph.chat = slow_chat
+    with client.websocket_connect("/ws/session") as ws:
+        ws.send_json({"type": "start", "project_path": d, "llm": {"provider": "anthropic", "api_key": "k"}, "request": "audita"})
+        while ws.receive_json()["type"] != "message":
+            pass
+        t = time.time()
+        ws.send_json({"type": "cancel"})
+        ev = []
+        while (e := ws.receive_json())["type"] != "done":
+            ev.append(e)
+        assert time.time() - t < 5 and "cancelada" in ev[-1]["content"], ev
+        graph.chat = fake_chat
+        ev = run(ws, {"type": "user_message", "content": "¿qué tal?"})
+        msgs = [e for e in ev if e["type"] == "message"]
+        assert msgs[0]["author"] == "user" and msgs[-1]["content"] == "Hola", msgs  # a cut-off start may repeat its intro
 
     assert client.get("/project", params={"path": d + "/nope"}).status_code == 404
     assert client.get("/health").json()["sandbox"] in ("ready", "stopped", "missing")

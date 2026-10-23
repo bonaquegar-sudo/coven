@@ -106,7 +106,7 @@ type State = {
   reset: () => void;
   send: (content: string) => void;
   fileAction: (type: "revert" | "accept", path: string) => void;
-  command: (msg: Record<string, unknown>) => void; // accept_risk / reopen / publish
+  command: (msg: Record<string, unknown>) => void; // accept_risk / reopen / publish / cancel
 };
 
 const idle = () => Object.fromEntries(Object.keys(AGENTS).map((a) => [a, { status: "idle", detail: "" }])) as State["agents"];

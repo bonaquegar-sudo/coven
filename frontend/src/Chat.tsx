@@ -270,6 +270,17 @@ function Composer({ hero }: { hero?: boolean }) {
         aria-label="Mensaje"
         className="max-h-48 w-full resize-none bg-transparent leading-[1.6] text-ink caret-emerald-400 outline-none placeholder:text-muted/70 [field-sizing:content]"
       />
+      {s.socket && s.running && (
+        <button
+          onClick={() => s.command({ type: "cancel" })}
+          aria-label="Cancelar"
+          title="Cancelar la ejecución"
+          className="flex h-7 shrink-0 items-center gap-1 rounded-md border border-red-400/30 px-2 text-[12px] text-red-300 hover:bg-red-500/10"
+        >
+          <Px icon={Close} size={12} />
+          Cancelar
+        </button>
+      )}
       <button
         onClick={submit}
         disabled={!!s.socket && !s.draft.trim()}

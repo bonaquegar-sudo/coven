@@ -68,6 +68,7 @@ class Session:
         self.events: list[dict] = []
         self.ws: WebSocket | None = None
         self.inbox: asyncio.Queue = asyncio.Queue()
+        self.run: asyncio.Task | None = None
         self.worker = asyncio.create_task(self.work())
 
     async def emit(self, event: dict):
@@ -135,11 +136,25 @@ class Session:
                 else:
                     raise ValueError(f"Tipo de mensaje desconocido: {kind}")
                 # ponytail: messages sent while the team is working queue up until this run ends.
-                async for event in graph.astream(inputs, run_config, stream_mode="custom"):
-                    await self.emit(event)
+                self.run = asyncio.create_task(self.stream(inputs, run_config))
+                await self.run
+            except asyncio.CancelledError:
+                if not (self.run and self.run.cancelled()):  # the worker itself is being cancelled, not just the run
+                    raise
+                await self.emit({"type": "message", **user_message("Ejecución cancelada. Los cambios hechos hasta ahora "
+                                 "siguen en el panel Diff.") | {"author": "system"}})
             except Exception as e:
                 await self.emit({"type": "error", "message": f"{type(e).__name__}: {e}"})
             await self.emit({"type": "done"})
+
+    async def stream(self, inputs: dict, run_config: dict):
+        async for event in graph.astream(inputs, run_config, stream_mode="custom"):
+            await self.emit(event)
+
+    def cancel(self):
+        # ponytail: a tool already running in a worker thread finishes on its own; its result is discarded
+        if self.run and not self.run.done():
+            self.run.cancel()
 
 
 SESSIONS: dict[str, Session] = {}  # ponytail: kept until the server exits; a cap if sessions pile up
@@ -171,6 +186,9 @@ async def session(ws: WebSocket):
                 await ws.send_json({"type": "session", "id": current.id})
             elif current is None:
                 await ws.send_json({"type": "error", "message": "Envía primero {'type': 'start'}"})
+                continue
+            elif data.get("type") == "cancel":  # bypasses the inbox: the worker is busy with the run
+                current.cancel()
                 continue
             current.inbox.put_nowait(data)
     except WebSocketDisconnect:
