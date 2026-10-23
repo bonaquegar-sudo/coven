@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><img alt="Descargar" src="https://img.shields.io/badge/descargar-v0.2.1-34d399"></a>
+  <a href="../../releases/latest"><img alt="Descargar" src="https://img.shields.io/badge/descargar-v0.2.2-34d399"></a>
   <img alt="Windows · macOS · Linux" src="https://img.shields.io/badge/Windows%20·%20macOS%20·%20Linux-161616">
   <img alt="Tauri + Python" src="https://img.shields.io/badge/Tauri%20+%20Python-161616">
 </p>
