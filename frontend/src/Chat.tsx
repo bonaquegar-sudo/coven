@@ -36,9 +36,10 @@ const prepare = (md: string) =>
     .map((part, i) => (i % 2 ? part : part.replace(MENTION, "[@$1](#mention-$1)").replace(WIN_PATH, "`$&`")))
     .join("");
 
-async function pickFolder(): Promise<string | null> {
+// undefined = not the desktop app; null = the user cancelled the dialog.
+async function pickFolder(): Promise<string | null | undefined> {
   const { isTauri } = await import("@tauri-apps/api/core");
-  if (!isTauri()) return null;
+  if (!isTauri()) return undefined;
   const { open } = await import("@tauri-apps/plugin-dialog");
   return open({ directory: true });
 }
@@ -195,7 +196,7 @@ function RepoField() {
         onClick={async () => {
           const path = await pickFolder();
           if (path) set({ projectPath: path });
-          else if (path === null) alert("El selector de carpetas solo está disponible en la app de escritorio. Escribe la ruta.");
+          else if (path === undefined) alert("El selector de carpetas solo está disponible en la app de escritorio. Escribe la ruta.");
         }}
         aria-label="Examinar carpetas"
         className="text-muted hover:text-ink"
